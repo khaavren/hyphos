@@ -29,10 +29,6 @@ export default function SymbiotePanel() {
   const resolvedSeed = seedInput.trim() || DEFAULT_SEED;
 
   useEffect(() => {
-    setCycle((prev) => Math.min(prev, maxCycle));
-  }, [maxCycle]);
-
-  useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }

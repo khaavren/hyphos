@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 
 type VSplitPaneProps = {
   ratio: number;
@@ -34,7 +34,7 @@ export default function VSplitPane({
   const rafRef = useRef<number | null>(null);
   const draggingRef = useRef(false);
 
-  const clampRatio = (value: number, height: number) => {
+  const clampRatio = useCallback((value: number, height: number) => {
     if (!height) {
       return value;
     }
@@ -44,7 +44,7 @@ export default function VSplitPane({
       return min;
     }
     return clamp(value, min, max);
-  };
+  }, [minTop, minBottom]);
 
   const applyRatio = (value: number) => {
     const container = containerRef.current;
@@ -93,7 +93,7 @@ export default function VSplitPane({
     });
     observer.observe(container);
     return () => observer.disconnect();
-  }, [collapsed, onRatioChange]);
+  }, [clampRatio, collapsed, onRatioChange]);
 
   const startDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     if (collapsed) {

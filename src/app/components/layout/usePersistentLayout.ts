@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 
 type PersistentOptions<T> = {
   parse?: (raw: string) => T;
@@ -12,25 +12,20 @@ export const usePersistentLayout = <T,>(
   defaultValue: T,
   options: PersistentOptions<T> = {},
 ) => {
-  const [value, setValue] = useState<T>(defaultValue);
-
-  useEffect(() => {
+  const [value, setValue] = useState<T>(() => {
     if (typeof window === "undefined") {
-      return;
+      return defaultValue;
     }
     const stored = window.localStorage.getItem(key);
     if (stored === null) {
-      return;
+      return defaultValue;
     }
     try {
-      const parsed = options.parse
-        ? options.parse(stored)
-        : (JSON.parse(stored) as T);
-      setValue(parsed);
+      return options.parse ? options.parse(stored) : (JSON.parse(stored) as T);
     } catch {
-      // ignore corrupted values
+      return defaultValue;
     }
-  }, [key, options.parse]);
+  });
 
   const setPersisted = useCallback(
     (next: T | ((prev: T) => T)) => {
@@ -46,7 +41,7 @@ export const usePersistentLayout = <T,>(
         return resolved;
       });
     },
-    [key, options.serialize],
+    [key, options],
   );
 
   return [value, setPersisted] as const;

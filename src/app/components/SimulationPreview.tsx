@@ -119,7 +119,7 @@ const drawPreview = (
         uniforms.u_pulseEnergy *
         0.6;
 
-      let value = clamp01(heightField + pulse) * (0.7 + uniforms.u_vitality * 0.4);
+      const value = clamp01(heightField + pulse) * (0.7 + uniforms.u_vitality * 0.4);
       const grain =
         (noise[3] - 0.5) *
         uniforms.u_grainStrength *

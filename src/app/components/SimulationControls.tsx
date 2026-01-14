@@ -29,10 +29,6 @@ export default function SimulationControls() {
   }, [runner]);
 
   useEffect(() => {
-    setSeedInput(runnerState.seed);
-  }, [runnerState.seed]);
-
-  useEffect(() => {
     const unsubscribe = subscribeToSnapshots((snap) => {
       setSnapshot(snap);
     }, 12);

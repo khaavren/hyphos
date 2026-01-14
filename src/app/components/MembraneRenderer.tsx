@@ -121,7 +121,7 @@ export default function MembraneRenderer() {
 
       try {
         await renderer.init(canvas, resourcesRef.current);
-      } catch (err) {
+      } catch {
         if (selection.backend !== "webgl2") {
           selection = await selectRenderer("webgl2");
           renderer = selection.renderer;

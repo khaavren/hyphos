@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 
 type SplitPaneProps = {
   ratio: number;
@@ -30,7 +30,7 @@ export default function SplitPane({
   const rafRef = useRef<number | null>(null);
   const draggingRef = useRef(false);
 
-  const clampRatio = (value: number, width: number) => {
+  const clampRatio = useCallback((value: number, width: number) => {
     if (!width) {
       return value;
     }
@@ -40,7 +40,7 @@ export default function SplitPane({
       return min;
     }
     return clamp(value, min, max);
-  };
+  }, [minLeft, minRight]);
 
   const applyRatio = (value: number) => {
     const container = containerRef.current;
@@ -83,7 +83,7 @@ export default function SplitPane({
     });
     observer.observe(container);
     return () => observer.disconnect();
-  }, [onRatioChange]);
+  }, [clampRatio, onRatioChange]);
 
   const startDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     const container = containerRef.current;

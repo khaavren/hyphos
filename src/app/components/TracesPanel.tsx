@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
-import { useModelSettings } from "../lib/graph/valueBridge";
+import { useModelSettings, type SimulationSnapshot } from "../lib/graph/valueBridge";
 import { getSimulationRunner } from "../lib/simulation/SimulationRunner";
 
 type TracesPanelProps = {
@@ -249,8 +249,8 @@ const drawGrid = (
 
 const drawLine = (
   ctx: CanvasRenderingContext2D,
-  points: any[],
-  getter: (snapshot: any) => number,
+  points: SimulationSnapshot[],
+  getter: (snapshot: SimulationSnapshot) => number,
   top: number,
   height: number,
   color: string,
@@ -277,7 +277,7 @@ const drawLine = (
 
 const drawStateBand = (
   ctx: CanvasRenderingContext2D,
-  points: any[],
+  points: SimulationSnapshot[],
   top: number,
   height: number,
   getX: (index: number) => number,

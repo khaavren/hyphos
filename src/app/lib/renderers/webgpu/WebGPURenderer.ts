@@ -340,20 +340,20 @@ const createTextureUpload = (texture: {
 };
 
 export class WebGPURenderer implements IRenderer {
-  private device: any;
-  private adapter: any;
-  private context: any = null;
-  private pipeline: any = null;
-  private uniformBuffer: any = null;
-  private bindGroup: any = null;
-  private sampler: any = null;
-  private textures: any[] = [];
+  private device: GPUDevice;
+  private adapter: GPUAdapter;
+  private context: GPUCanvasContext | null = null;
+  private pipeline: GPURenderPipeline | null = null;
+  private uniformBuffer: GPUBuffer | null = null;
+  private bindGroup: GPUBindGroup | null = null;
+  private sampler: GPUSampler | null = null;
+  private textures: GPUTexture[] = [];
   private canvas: HTMLCanvasElement | null = null;
-  private format: string | null = null;
+  private format: GPUTextureFormat | null = null;
   private cssWidth = 1;
   private cssHeight = 1;
 
-  constructor(device: any, adapter: any) {
+  constructor(device: GPUDevice, adapter: GPUAdapter) {
     this.device = device;
     this.adapter = adapter;
   }
@@ -362,7 +362,7 @@ export class WebGPURenderer implements IRenderer {
     if (typeof navigator === "undefined") {
       return null;
     }
-    const gpu = (navigator as any).gpu;
+    const gpu = navigator.gpu;
     if (!gpu) {
       return null;
     }
@@ -382,13 +382,13 @@ export class WebGPURenderer implements IRenderer {
     if (!this.device) {
       throw new Error("WebGPU device missing");
     }
-    const context = canvas.getContext("webgpu");
+    const context = canvas.getContext("webgpu") as GPUCanvasContext | null;
     if (!context) {
       throw new Error("WebGPU context not available");
     }
     this.canvas = canvas;
     this.context = context;
-    this.format = (navigator as any).gpu?.getPreferredCanvasFormat?.();
+    this.format = navigator.gpu.getPreferredCanvasFormat();
     if (!this.format) {
       throw new Error("WebGPU format not available");
     }
@@ -412,9 +412,7 @@ export class WebGPURenderer implements IRenderer {
 
     this.uniformBuffer = this.device.createBuffer({
       size: alignBytes(56 * 4, 256),
-      usage:
-        (globalThis as any).GPUBufferUsage.UNIFORM |
-        (globalThis as any).GPUBufferUsage.COPY_DST,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
     this.sampler = this.device.createSampler({
@@ -429,14 +427,16 @@ export class WebGPURenderer implements IRenderer {
       const gpuTexture = this.device.createTexture({
         size: { width: texture.width, height: texture.height },
         format,
-        usage:
-          (globalThis as any).GPUTextureUsage.TEXTURE_BINDING |
-          (globalThis as any).GPUTextureUsage.COPY_DST,
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
       });
       const upload = createTextureUpload(texture);
+      const uploadData =
+        upload.data.buffer instanceof ArrayBuffer
+          ? (upload.data as Uint8Array<ArrayBuffer>)
+          : new Uint8Array(upload.data);
       this.device.queue.writeTexture(
         { texture: gpuTexture },
-        upload.data,
+        uploadData,
         { bytesPerRow: upload.bytesPerRow, rowsPerImage: texture.height },
         { width: texture.width, height: texture.height, depthOrArrayLayers: 1 },
       );
@@ -468,8 +468,7 @@ export class WebGPURenderer implements IRenderer {
       device: this.device,
       format: this.format,
       alphaMode: "opaque",
-      usage: (globalThis as any).GPUTextureUsage.RENDER_ATTACHMENT,
-      size: { width: pixelWidth, height: pixelHeight },
+      usage: GPUTextureUsage.RENDER_ATTACHMENT,
     });
   }
 

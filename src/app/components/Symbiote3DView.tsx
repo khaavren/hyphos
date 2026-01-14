@@ -56,6 +56,8 @@ const STYLE = {
   LIGHT_CLAMP: 0.92,
 };
 
+let lastBioticDensity = 0;
+
 const smoothstep = (edge0: number, edge1: number, x: number) => {
   const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
   return t * t * (3 - 2 * t);
@@ -121,7 +123,150 @@ const hashSeed = (input: string) => {
   return hash >>> 0;
 };
 
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+const fract = (value: number) => value - Math.floor(value);
+
+const hash3 = (x: number, y: number, z: number) =>
+  fract(Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453123);
+
+const noise3 = (p: THREE.Vector3) => {
+  const ix = Math.floor(p.x);
+  const iy = Math.floor(p.y);
+  const iz = Math.floor(p.z);
+  const fx = p.x - ix;
+  const fy = p.y - iy;
+  const fz = p.z - iz;
+  const ux = fx * fx * (3 - 2 * fx);
+  const uy = fy * fy * (3 - 2 * fy);
+  const uz = fz * fz * (3 - 2 * fz);
+
+  const n000 = hash3(ix, iy, iz);
+  const n100 = hash3(ix + 1, iy, iz);
+  const n010 = hash3(ix, iy + 1, iz);
+  const n110 = hash3(ix + 1, iy + 1, iz);
+  const n001 = hash3(ix, iy, iz + 1);
+  const n101 = hash3(ix + 1, iy, iz + 1);
+  const n011 = hash3(ix, iy + 1, iz + 1);
+  const n111 = hash3(ix + 1, iy + 1, iz + 1);
+
+  const n00 = lerp(n000, n100, ux);
+  const n10 = lerp(n010, n110, ux);
+  const n01 = lerp(n001, n101, ux);
+  const n11 = lerp(n011, n111, ux);
+  const n0 = lerp(n00, n10, uy);
+  const n1 = lerp(n01, n11, uy);
+  return lerp(n0, n1, uz);
+};
+
+const fbm3 = (p: THREE.Vector3, octaves = 4) => {
+  let value = 0;
+  let amplitude = 0.5;
+  const temp = p.clone();
+  for (let i = 0; i < octaves; i += 1) {
+    value += amplitude * noise3(temp);
+    temp.multiplyScalar(2);
+    amplitude *= 0.5;
+  }
+  return value;
+};
+
+const sampleSurfaceRadius = (
+  dir: THREE.Vector3,
+  seedNorm: number,
+  cycle: number,
+  age: number,
+) => {
+  const early = smoothstep(0.0, 0.06, age);
+  const warpAmp = lerp(STYLE.WARP_MIN, STYLE.WARP_MAX, early);
+  const dispAmpLarge = lerp(STYLE.DISP_LARGE_MIN, STYLE.DISP_LARGE_MAX, early);
+  const dispAmpSmall = lerp(STYLE.DISP_SMALL_MIN, STYLE.DISP_SMALL_MAX, early);
+
+  const bucket = Math.floor(cycle / 50);
+  const t = cycle / 50 - bucket;
+  const seedA = seedNorm + bucket * 0.13;
+  const seedB = seedNorm + (bucket + 1) * 0.13;
+
+  const p = dir.clone().multiplyScalar(2.0);
+  const warpA = new THREE.Vector3(
+    fbm3(new THREE.Vector3(p.x + seedA * 1.2, p.y + seedA * 0.7, p.z + seedA * 1.3)),
+    fbm3(new THREE.Vector3(p.x + seedA * 1.1, p.y + seedA * 0.3, p.z + seedA * 0.9)),
+    fbm3(new THREE.Vector3(p.x + seedA * 0.2, p.y + seedA * 1.3, p.z + seedA * 0.4)),
+  ).addScalar(-0.5);
+  const warpB = new THREE.Vector3(
+    fbm3(new THREE.Vector3(p.x + seedB * 1.2, p.y + seedB * 0.7, p.z + seedB * 1.3)),
+    fbm3(new THREE.Vector3(p.x + seedB * 1.1, p.y + seedB * 0.3, p.z + seedB * 0.9)),
+    fbm3(new THREE.Vector3(p.x + seedB * 0.2, p.y + seedB * 1.3, p.z + seedB * 0.4)),
+  ).addScalar(-0.5);
+  const warp = warpA.lerp(warpB, t).multiplyScalar(warpAmp);
+  const warpedP = p.clone().addScaledVector(warp, 1.25);
+
+  const nA = fbm3(new THREE.Vector3(warpedP.x + seedA * 0.7, warpedP.y + seedA * 0.7, warpedP.z + seedA * 0.7));
+  const nB = fbm3(new THREE.Vector3(warpedP.x + seedB * 0.7, warpedP.y + seedB * 0.7, warpedP.z + seedB * 0.7));
+  const n = lerp(nA, nB, t);
+  const nSmall = fbm3(
+    new THREE.Vector3(
+      warpedP.x * 2.6 + seedA * 1.9,
+      warpedP.y * 2.6 + seedA * 1.9,
+      warpedP.z * 2.6 + seedA * 1.9,
+    ),
+  );
+
+  const lowA = fbm3(new THREE.Vector3(p.x * 0.6 + seedA * 0.35, p.y * 0.6 + seedA * 0.2, p.z * 0.6 + seedA * 0.6));
+  const lowB = fbm3(new THREE.Vector3(p.x * 0.6 + seedB * 0.35, p.y * 0.6 + seedB * 0.2, p.z * 0.6 + seedB * 0.6));
+  const low = lerp(lowA, lowB, t);
+
+  const axis1 = new THREE.Vector3(
+    Math.sin(seedA * 1.7),
+    Math.cos(seedA * 2.1),
+    Math.sin(seedA * 0.9),
+  ).normalize();
+  const axis2 = new THREE.Vector3(
+    Math.cos(seedA * 0.4),
+    Math.sin(seedA * 1.6),
+    Math.cos(seedA * 1.1),
+  ).normalize();
+  const axis3 = new THREE.Vector3(
+    Math.sin(seedA * 0.9),
+    Math.sin(seedA * 0.2),
+    Math.cos(seedA * 1.7),
+  ).normalize();
+  const lobe =
+    dir.dot(axis1) * 0.55 +
+    dir.dot(axis2) * 0.35 +
+    dir.dot(axis3) * -0.25;
+  const lobeShape = lobe * lobe * lobe;
+
+  let radius = 1.0;
+  const shapeStage = smoothstep(0.08, 0.6, age);
+  const shapeStrength = lerp(0.16, 0.44, shapeStage);
+  radius *= 1.0 + lobeShape * shapeStrength;
+  radius *= 1.0 + (low - 0.5) * (0.18 + 0.08 * shapeStage) * dispAmpLarge;
+
+  const cellNoise = fbm3(
+    new THREE.Vector3(
+      dir.x * 2.4 + seedA * 1.5,
+      dir.y * 2.4 + seedA * 0.8,
+      dir.z * 2.4 + seedA * 1.1,
+    ),
+  );
+  const cellAmp = lerp(0.08, 0.22, shapeStage);
+  radius *= 1.0 + (cellNoise - 0.5) * cellAmp;
+
+  const ampLarge = lerp(0.25, 0.18, 0.5);
+  const ampSmall = lerp(0.1, 0.05, 0.5);
+  const disp =
+    (n - 0.5) * ampLarge * dispAmpLarge +
+    (nSmall - 0.5) * ampSmall * dispAmpSmall +
+    lobeShape * 0.08 * dispAmpLarge;
+  radius += disp;
+
+  return clamp(radius, 0.85, 1.45);
+};
+
 const vertexShader = `
+  precision highp float;
+  precision highp int;
   uniform float u_time;
   uniform float u_cycle;
   uniform float u_age;
@@ -199,7 +344,9 @@ const vertexShader = `
 
     vec3 pos = position;
     vec3 npos = normalize(position);
-    vec3 p = pos * 2.4;
+    vec3 worldPos = (modelMatrix * vec4(pos, 1.0)).xyz;
+    vec3 worldDir = normalize(worldPos);
+    vec3 p = worldPos * 2.0;
     vec3 timeOffset = vec3(0.0, u_time * 0.06, 0.0);
     vec3 warpA = vec3(
       fbm(p + vec3(seedA * 1.2, seedA * 0.7, seedA * 1.3)),
@@ -250,12 +397,13 @@ const vertexShader = `
     float scaleMix = mix(0.6, 1.0, early);
     pos *= mix(vec3(1.0), seedScale, scaleMix);
 
-    float shapeStrength = mix(0.22, 0.36, early);
+    float shapeStage = smoothstep(0.08, 0.6, age);
+    float shapeStrength = mix(0.16, 0.44, shapeStage);
     pos *= 1.0 + lobeShape * shapeStrength;
-    pos *= 1.0 + (low - 0.5) * 0.18 * dispAmpLarge;
+    pos *= 1.0 + (low - 0.5) * (0.18 + 0.08 * shapeStage) * dispAmpLarge;
 
-    float cellNoise = fbm(npos * 2.4 + vec3(seedA * 1.5, seedA * 0.8, seedA * 1.1));
-    float cellAmp = mix(0.12, 0.2, early);
+    float cellNoise = fbm(worldDir * 2.4 + vec3(seedA * 1.5, seedA * 0.8, seedA * 1.1));
+    float cellAmp = mix(0.08, 0.22, shapeStage);
     pos *= 1.0 + (cellNoise - 0.5) * cellAmp;
 
     float bleb =
@@ -266,11 +414,11 @@ const vertexShader = `
 
     float bulgeNoise = ridge(fbm(warpedP * 1.1 + vec3(seedA * 2.1)));
     float bulge = pow(max(bulgeNoise - 0.15, 0.0), 1.6);
-    pos += npos * bulge * (0.18 + 0.12 * mature) * grow;
+    pos += npos * bulge * (0.12 + 0.22 * mature) * grow;
 
     float lumpsNoise = ridge(fbm(warpedP * 1.8 + vec3(seedB * 1.7)));
     float lumps = smoothstep(0.2, 0.85, lumpsNoise);
-    pos += npos * (lumps - 0.5) * (0.08 + 0.08 * mature) * grow;
+    pos += npos * (lumps - 0.5) * (0.08 + 0.14 * mature) * grow;
 
     float ampLarge = mix(0.25, 0.18, clamp(u_stiffness, 0.0, 1.0));
     float ampSmall = mix(0.1, 0.05, clamp(u_stiffness, 0.0, 1.0));
@@ -291,6 +439,8 @@ const vertexShader = `
 `;
 
 const fragmentShader = `
+  precision highp float;
+  precision highp int;
   uniform float u_time;
   uniform float u_cycle;
   uniform float u_age;
@@ -364,19 +514,12 @@ const fragmentShader = `
     return 1.0 - abs(n * 2.0 - 1.0);
   }
 
-  float triLine(vec3 p, vec3 dir, float freq) {
-    float v = dot(p, dir) * freq;
-    float f = abs(fract(v) - 0.5);
-    return f;
-  }
-
   void main() {
     float age = clamp(u_age, 0.0, 1.0);
     float early = smoothstep(0.02, 0.12, age);
     float grow = smoothstep(0.2, 0.6, age);
     float mature = smoothstep(0.6, 1.0, age);
     float veryEarly = smoothstep(0.0, 0.02, age);
-    float latticeAge = smoothstep(0.12, 0.35, age);
     float warpAmp = mix(WARP_MIN, WARP_MAX, early);
 
     vec3 n = normalize(vNormal);
@@ -387,7 +530,7 @@ const fragmentShader = `
     float seedA = u_seed + bucket * 0.13;
     float seedB = u_seed + (bucket + 1.0) * 0.13;
 
-    vec3 p = vPos * 2.4;
+    vec3 p = vWorld * 2.0;
     vec3 warp = vec3(
       fbm(p + vec3(seedA, seedA * 0.9, seedA * 0.3)),
       fbm(p + vec3(seedA * 0.6, seedA * 1.1, seedA * 0.2)),
@@ -398,6 +541,16 @@ const fragmentShader = `
     float nA = fbm(warpedP + vec3(seedA) + timeOffset);
     float nB = fbm(warpedP + vec3(seedB) + timeOffset);
     float nMix = mix(nA, nB, t);
+    float roughness = clamp(
+      0.78 - 0.25 * fbm(warpedP * 1.2 + vec3(seedB * 0.9)),
+      0.35,
+      0.9
+    );
+    float ao = 1.0 - 0.35 * smoothstep(
+      0.35,
+      0.8,
+      fbm(warpedP * 1.6 + vec3(seedA * 0.6))
+    );
 
     float veinScale = 2.0;
     float veinNoise = ridge(fbm(warpedP * veinScale + vec3(seedA * 1.7)));
@@ -413,7 +566,6 @@ const fragmentShader = `
     float patchNoise2 = fbm(warpedP * 0.6 + vec3(seedB * 1.3));
     float blobs = smoothstep(0.35, 0.7, patchNoise + 0.35 * patchNoise2);
 
-    float latticeMask = 0.0;
 
     vec3 baseStart = vec3(0.88, 0.80, 0.88);
     vec3 baseMature = vec3(0.56, 0.66, 0.56);
@@ -452,18 +604,13 @@ const fragmentShader = `
     patchMask *= patchCoverage * (0.8 + 0.2 * mature);
     microStrength *= mix(1.0, 1.25, patchMask);
 
-    if (u_debugColorMode > 0.5) {
-      gl_FragColor = vec4(microNormal * 0.5 + 0.5, 1.0);
-      return;
-    }
-
     vec3 color = base;
     color = mix(color, mossColor, patchMask * 0.9);
     color = mix(color, lichenColor, patchMask * 0.6);
     color = mix(color, color * 0.9, patchMask * 0.55);
     color *= (1.0 - veinsMask * 0.12);
     color += veinsMask * vec3(0.1, 0.05, 0.16) * 0.35;
-    color = mix(color, color * 0.9, latticeMask);
+    color *= ao;
 
     vec3 lightA = normalize(vec3(0.6, 0.8, 1.0));
     vec3 lightB = normalize(vec3(-0.7, 0.4, 0.8));
@@ -487,11 +634,21 @@ const fragmentShader = `
       color * wrapDiffuseA * 0.55 * lightACol +
       color * wrapDiffuseB * 0.25 * lightBCol +
       color * wrapDiffuseC * 0.12 * lightCCol;
-    vec3 lightTerm = diffuse + subsurfaceColor * (scatter * thickness) * 0.75;
+    diffuse *= mix(1.0, 0.85, roughness);
+    vec3 lightTerm =
+      diffuse + subsurfaceColor * (scatter * thickness) * (0.75 * ao);
     color = lightTerm;
 
     float vitality = clamp(u_vitality, 0.0, 1.0);
     color *= 0.84 + vitality * 0.12;
+
+    vec3 halfDir = normalize(lightA + viewDir);
+    float spec = pow(max(dot(microNormal, halfDir), 0.0), mix(28.0, 10.0, roughness));
+    float specMask =
+      (1.0 - roughness) *
+      0.08 *
+      (0.6 + 0.4 * fbm(warpedP * 2.0 + vec3(seedB * 1.3)));
+    color += specMask * spec;
 
     float contrast = mix(0.85, 1.0, early);
     color = mix(color, color * (0.9 + nMix * 0.1), 0.12 + veryEarly * 0.05);
@@ -508,6 +665,8 @@ const fragmentShader = `
 `;
 
 const veinFragmentShader = `
+  precision highp float;
+  precision highp int;
   uniform float u_time;
   uniform float u_cycle;
   uniform float u_age;
@@ -568,7 +727,7 @@ const veinFragmentShader = `
     float seedA = u_seed + bucket * 0.13;
     float seedB = u_seed + (bucket + 1.0) * 0.13;
 
-    vec3 p = vPos * 3.1;
+    vec3 p = vWorld * 2.6;
     vec3 warp = vec3(
       fbm(p + vec3(seedA * 0.7, seedA * 1.1, seedA * 0.3)),
       fbm(p + vec3(seedA * 1.3, seedA * 0.5, seedA * 0.9)),
@@ -608,6 +767,8 @@ type SymbioteMeshProps = {
   scale: [number, number, number];
 };
 
+const USE_DEBUG_STANDARD_MATERIAL = false;
+
 const SymbioteMesh = ({
   uniforms,
   scale,
@@ -615,12 +776,18 @@ const SymbioteMesh = ({
   const geometry = useMemo(() => new THREE.IcosahedronGeometry(1, 7), []);
   const material = useMemo(
     () =>
-      new THREE.ShaderMaterial({
-        vertexShader,
-        fragmentShader,
-        uniforms,
-        transparent: false,
-      }),
+      USE_DEBUG_STANDARD_MATERIAL
+        ? new THREE.MeshStandardMaterial({
+            color: "#2f5b3a",
+            roughness: 0.9,
+            metalness: 0.0,
+          })
+        : new THREE.ShaderMaterial({
+            vertexShader,
+            fragmentShader,
+            uniforms,
+            transparent: false,
+          }),
     [uniforms],
   );
 
@@ -644,16 +811,27 @@ const SymbioteMesh = ({
 
 type BioticOverlaysProps = {
   seed: number;
+  cycle?: number;
+  seedNorm?: number;
   age: number;
   colorAgnostic: boolean;
 };
 
-const BioticOverlays = ({ seed, age, colorAgnostic }: BioticOverlaysProps) => {
+const BioticOverlays = ({
+  seed,
+  cycle = 0,
+  seedNorm = ((seed >>> 0) / 4294967295) * 10,
+  age,
+  colorAgnostic,
+}: BioticOverlaysProps) => {
   const growth = smoothstep(0.18, 0.6, age);
   const mature = smoothstep(0.6, 1.0, age);
   const enableNodes = false;
 
   const overlayData = useMemo(() => {
+    const stage = smoothstep(0.2, 0.6, age);
+    const lateStage = smoothstep(0.6, 1.0, age);
+    const leafEnabled = age > 0.45;
     if (growth <= 0.02) {
       return {
         vineGeometries: [] as THREE.TubeGeometry[],
@@ -661,74 +839,227 @@ const BioticOverlays = ({ seed, age, colorAgnostic }: BioticOverlaysProps) => {
         nodeScales: [] as number[],
         mossPoints: [] as THREE.Vector3[],
         mossScales: [] as number[],
+        mossCardNormals: [] as THREE.Vector3[],
+        mossCardScales: [] as number[],
+        mossCardRolls: [] as number[],
+        mossCardRadii: [] as number[],
         leafNormals: [] as THREE.Vector3[],
         leafScales: [] as number[],
         leafRolls: [] as number[],
+        leafRadii: [] as number[],
         surfaceRadius: 1.02,
       };
     }
 
     const rng = mulberry32(seed);
-    const vineCount = Math.round(10 + growth * 30);
-    const segmentCount = Math.round(18 + growth * 26);
-    const vineRadius = 1.02 + 0.03 * growth;
+    const up = new THREE.Vector3(0, 1, 0);
+    const patchField = (dir: THREE.Vector3) =>
+      fbm3(
+        new THREE.Vector3(
+          dir.x * 3.2 + seedNorm * 0.17,
+          dir.y * 3.2 + seedNorm * 0.29,
+          dir.z * 3.2 + seedNorm * 0.41,
+        ),
+      );
+    const creaseField = (dir: THREE.Vector3) =>
+      fbm3(
+        new THREE.Vector3(
+          dir.x * 5.2 + seedNorm * 0.33,
+          dir.y * 5.2 + seedNorm * 0.21,
+          dir.z * 5.2 + seedNorm * 0.47,
+        ),
+      );
+    const colonyCount = Math.round(6 + 6 * smoothstep(0.2, 0.75, age));
+    const colonyCenters = Array.from({ length: colonyCount }, () => {
+      const center = randomUnitVector(rng);
+      if (rng() < 0.7) {
+        return center.lerp(up, 0.25 + 0.35 * rng()).normalize();
+      }
+      return center;
+    });
+    const clusterFactorForDir = (dir: THREE.Vector3) => {
+      let nearest = -1;
+      for (let i = 0; i < colonyCenters.length; i += 1) {
+        nearest = Math.max(nearest, dir.dot(colonyCenters[i]));
+      }
+      return smoothstep(0.2, 0.85, nearest);
+    };
+    const vineCount = Math.round(16 + 28 * stage + 18 * lateStage);
+    const segmentCount = Math.round(22 + 40 * stage + 16 * lateStage);
+    const baseSurfaceRadius = 1.0;
+    const vineOffset = 0.02 + 0.03 * growth;
+    const mossOffset = 0.015 + 0.02 * growth;
+    const leafOffset = 0.018 + 0.025 * growth;
     const vineGeometries: THREE.TubeGeometry[] = [];
     const nodePoints: THREE.Vector3[] = [];
     const nodeScales: number[] = [];
 
     for (let i = 0; i < vineCount; i += 1) {
-      let theta = rng() * Math.PI * 2;
-      let phi = Math.acos(2 * rng() - 1);
+      const colony = colonyCenters[Math.floor(rng() * colonyCenters.length)];
+      let normal = colony
+        .clone()
+        .lerp(randomUnitVector(rng), 0.25 + 0.25 * rng())
+        .normalize();
+      if (normal.dot(up) < -0.15 && rng() < 0.7) {
+        normal = normal.lerp(up, 0.35).normalize();
+      }
+      let tangent = new THREE.Vector3().crossVectors(up, normal);
+      if (tangent.lengthSq() < 1e-4) {
+        tangent = new THREE.Vector3().crossVectors(new THREE.Vector3(1, 0, 0), normal);
+      }
+      tangent.normalize();
+      const randomTangent = randomUnitVector(rng).cross(normal).normalize();
+      tangent.lerp(randomTangent, 0.35).normalize();
       const points: THREE.Vector3[] = [];
       for (let s = 0; s < segmentCount; s += 1) {
-        const step = 0.15 + 0.18 * rng();
-        theta += (rng() - 0.5) * step;
-        phi += (rng() - 0.5) * step;
-        phi = clamp(phi, 0.25, Math.PI - 0.25);
-        const dir = new THREE.Vector3().setFromSphericalCoords(1, phi, theta);
-        points.push(dir.clone().multiplyScalar(vineRadius));
+        const step = 0.05 + 0.1 * rng();
+        const randVec = randomUnitVector(rng);
+        const tangentJitter = randVec.sub(normal.clone().multiplyScalar(randVec.dot(normal)));
+        tangent.addScaledVector(tangentJitter, 0.35).normalize();
+        normal.addScaledVector(tangent, step).normalize();
+        const surfaceRadius = sampleSurfaceRadius(normal, seedNorm, cycle, age);
+        const surfaceDisplacement = surfaceRadius - baseSurfaceRadius;
+        const radius = baseSurfaceRadius + surfaceDisplacement + vineOffset;
+        const jitter = randomUnitVector(rng);
+        jitter.sub(normal.clone().multiplyScalar(jitter.dot(normal)));
+        if (jitter.lengthSq() > 1e-6) {
+          jitter.normalize();
+        }
+        const jitterScale = (0.002 + 0.004 * growth) * (0.4 + 0.6 * rng());
+        points.push(
+          normal
+            .clone()
+            .multiplyScalar(radius)
+            .add(jitter.multiplyScalar(jitterScale)),
+        );
         if (enableNodes && s % 5 === 0 && rng() < 0.7) {
-          nodePoints.push(dir.clone().multiplyScalar(vineRadius * 1.01));
+          nodePoints.push(normal.clone().multiplyScalar(radius + 0.006));
           nodeScales.push(0.026 + 0.04 * rng() * (0.5 + 0.5 * mature));
         }
       }
       const curve = new THREE.CatmullRomCurve3(points);
       const geom = new THREE.TubeGeometry(
         curve,
-        points.length * 6,
-        0.016 + 0.016 * mature,
-        8,
+        points.length * 8,
+        0.004 + 0.003 * stage + 0.002 * lateStage,
+        10,
         false,
       );
+      const posAttr = geom.getAttribute("position") as THREE.BufferAttribute;
+      const uvAttr = geom.getAttribute("uv") as THREE.BufferAttribute;
+      const tempPos = new THREE.Vector3();
+      const center = new THREE.Vector3();
+      for (let v = 0; v < posAttr.count; v += 1) {
+        const u = uvAttr.getX(v);
+        center.copy(curve.getPointAt(u));
+        tempPos.fromBufferAttribute(posAttr, v);
+        const radial = tempPos.clone().sub(center);
+        const radialLen = radial.length();
+        if (radialLen > 0.0001) {
+          const taper = lerp(1.0, 0.3, u);
+          const offset = 0.002 + 0.002 * mature;
+          radial.normalize().multiplyScalar(radialLen * taper + offset);
+          tempPos.copy(center).add(radial);
+          posAttr.setXYZ(v, tempPos.x, tempPos.y, tempPos.z);
+        }
+      }
+      posAttr.needsUpdate = true;
+      geom.computeVertexNormals();
       vineGeometries.push(geom);
     }
 
     const mossPoints: THREE.Vector3[] = [];
     const mossScales: number[] = [];
-    const mossCount = Math.round(90 + 360 * growth);
-    for (let i = 0; i < mossCount; i += 1) {
+    const mossCardNormals: THREE.Vector3[] = [];
+    const mossCardScales: number[] = [];
+    const mossCardRolls: number[] = [];
+    const mossCardRadii: number[] = [];
+    const mossCardCount = Math.round(80 + 380 * stage + 160 * lateStage);
+    const mossBudCount = Math.round(7 + 36 * stage + 18 * lateStage);
+    for (let i = 0; i < mossCardCount; i += 1) {
       const dir = randomUnitVector(rng);
-      const upBias = Math.pow(Math.max(0, dir.y), 0.28);
-      if (rng() > 0.28 + 0.62 * upBias) {
+      const lightBias = clamp(dir.dot(up) * 0.5 + 0.5, 0, 1);
+      const gravityBias = clamp(1.0 - lightBias, 0, 1);
+      const topBias = lightBias * lightBias;
+      const patch = patchField(dir);
+      const clusterFactor = clusterFactorForDir(dir);
+      const crease = smoothstep(0.25, 0.75, creaseField(dir));
+      const mossChance =
+        (0.15 + 0.85 * topBias) *
+        (0.35 + 0.65 * clusterFactor) *
+        (0.4 + 0.6 * stage) *
+        (0.5 + 0.5 * crease) *
+        (1.0 - gravityBias * 0.55);
+      if (rng() > mossChance) {
         continue;
       }
-      mossPoints.push(dir.multiplyScalar(vineRadius * 1.01));
-      mossScales.push(0.03 + 0.06 * rng() * (0.6 + 0.4 * mature));
+      if (patch < 0.42) {
+        continue;
+      }
+      const surfaceRadius = sampleSurfaceRadius(dir, seedNorm, cycle, age);
+      const surfaceDisplacement = surfaceRadius - baseSurfaceRadius;
+      mossCardNormals.push(dir);
+      mossCardScales.push(0.04 + 0.07 * rng() * (0.6 + 0.4 * mature));
+      mossCardRolls.push(rng() * Math.PI * 2);
+      mossCardRadii.push(baseSurfaceRadius + surfaceDisplacement + mossOffset);
+    }
+    for (let i = 0; i < mossBudCount; i += 1) {
+      const dir = randomUnitVector(rng);
+      const lightBias = clamp(dir.dot(up) * 0.5 + 0.5, 0, 1);
+      const gravityBias = clamp(1.0 - lightBias, 0, 1);
+      const topBias = lightBias * lightBias;
+      const patch = patchField(dir);
+      const clusterFactor = clusterFactorForDir(dir);
+      const mossChance =
+        (0.18 + 0.82 * topBias) *
+        (0.35 + 0.65 * clusterFactor) *
+        (0.35 + 0.65 * stage) *
+        (1.0 - gravityBias * 0.6);
+      if (rng() > mossChance) {
+        continue;
+      }
+      if (patch < 0.46) {
+        continue;
+      }
+      const surfaceRadius = sampleSurfaceRadius(dir, seedNorm, cycle, age);
+      const surfaceDisplacement = surfaceRadius - baseSurfaceRadius;
+      const radius = baseSurfaceRadius + surfaceDisplacement + mossOffset;
+      mossPoints.push(dir.clone().multiplyScalar(radius));
+      mossScales.push(0.008 + 0.022 * rng() * (0.7 + 0.3 * mature));
     }
 
     const leafNormals: THREE.Vector3[] = [];
     const leafScales: number[] = [];
     const leafRolls: number[] = [];
-    const leafCount = Math.round(220 + 560 * growth);
+    const leafRadii: number[] = [];
+    const leafCount = leafEnabled
+      ? Math.round(120 + 520 * stage + 300 * lateStage)
+      : 0;
     for (let i = 0; i < leafCount; i += 1) {
       const dir = randomUnitVector(rng);
-      const upBias = Math.pow(Math.max(0, dir.y), 0.22);
-      if (rng() > 0.22 + 0.7 * upBias) {
+      const lightBias = clamp(dir.dot(up) * 0.5 + 0.5, 0, 1);
+      const gravityBias = clamp(1.0 - lightBias, 0, 1);
+      const patch = patchField(dir);
+      const clusterFactor = clusterFactorForDir(dir);
+      const leafChance =
+        (0.15 + 0.85 * lightBias * lightBias) *
+        (0.25 + 0.75 * clusterFactor) *
+        (0.2 + 0.8 * stage) *
+        (1.0 - gravityBias * 0.75);
+      if (rng() > leafChance) {
+        continue;
+      }
+      if (patch < 0.48) {
         continue;
       }
       leafNormals.push(dir);
-      leafScales.push(0.06 + 0.12 * rng() * (0.6 + 0.4 * mature));
+      leafScales.push(
+        0.035 + 0.06 * rng() * (0.65 + 0.35 * mature),
+      );
       leafRolls.push(rng() * Math.PI * 2);
+      const surfaceRadius = sampleSurfaceRadius(dir, seedNorm, cycle, age);
+      const surfaceDisplacement = surfaceRadius - baseSurfaceRadius;
+      leafRadii.push(baseSurfaceRadius + surfaceDisplacement + leafOffset);
     }
 
     return {
@@ -737,12 +1068,38 @@ const BioticOverlays = ({ seed, age, colorAgnostic }: BioticOverlaysProps) => {
       nodeScales,
       mossPoints,
       mossScales,
+      mossCardNormals,
+      mossCardScales,
+      mossCardRolls,
+      mossCardRadii,
       leafNormals,
       leafScales,
       leafRolls,
-      surfaceRadius: vineRadius * 1.01,
+      leafRadii,
+      surfaceRadius: baseSurfaceRadius + vineOffset,
     };
-  }, [seed, growth, mature, enableNodes]);
+  }, [seed, seedNorm, cycle, age, growth, mature, enableNodes]);
+
+  const bioticDensity = useMemo(() => {
+    const vineCount = overlayData.vineGeometries.length;
+    const mossNear = overlayData.mossPoints.reduce(
+      (acc, point) => acc + (point.y > 0.75 ? 1 : 0),
+      0,
+    );
+    const mossCardNear = overlayData.mossCardNormals.reduce(
+      (acc, normal) => acc + (normal.y > 0.75 ? 1 : 0),
+      0,
+    );
+    const leafNear = overlayData.leafNormals.reduce(
+      (acc, normal) => acc + (normal.y > 0.75 ? 1 : 0),
+      0,
+    );
+    return clamp(vineCount * 0.02 + (mossNear + mossCardNear + leafNear) * 0.002, 0, 1);
+  }, [overlayData]);
+
+  useEffect(() => {
+    lastBioticDensity = bioticDensity;
+  }, [bioticDensity]);
 
   useEffect(() => {
     return () => {
@@ -754,10 +1111,14 @@ const BioticOverlays = ({ seed, age, colorAgnostic }: BioticOverlaysProps) => {
     () =>
       new THREE.MeshStandardMaterial({
         color: colorAgnostic ? "#cfcfcf" : "#6a3ea8",
-        roughness: 0.85,
-        metalness: 0.02,
+        roughness: 0.92,
+        metalness: 0.0,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+        depthWrite: true,
         transparent: true,
-        opacity: 0.88,
+        opacity: 0.78,
       }),
     [colorAgnostic],
   );
@@ -780,11 +1141,46 @@ const BioticOverlays = ({ seed, age, colorAgnostic }: BioticOverlaysProps) => {
     () =>
       new THREE.MeshStandardMaterial({
         color: colorAgnostic ? "#bdbdbd" : "#6fa66d",
-        roughness: 0.9,
+        roughness: 0.98,
         metalness: 0.0,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+        depthWrite: true,
+        transparent: true,
+        opacity: 0.5,
       }),
     [colorAgnostic],
   );
+
+  const mossTexture = useMemo(() => {
+    if (typeof document === "undefined") {
+      return null;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = 96;
+    canvas.height = 96;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return null;
+    }
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const gradient = ctx.createRadialGradient(48, 48, 6, 48, 48, 44);
+    gradient.addColorStop(0, "rgba(255,255,255,0.95)");
+    gradient.addColorStop(0.5, "rgba(255,255,255,0.45)");
+    gradient.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.ellipse(48, 48, 40, 40, 0, 0, Math.PI * 2);
+    ctx.fill();
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.needsUpdate = true;
+    return texture;
+  }, []);
 
   const leafTexture = useMemo(() => {
     if (typeof document === "undefined") {
@@ -818,8 +1214,9 @@ const BioticOverlays = ({ seed, age, colorAgnostic }: BioticOverlaysProps) => {
   useEffect(() => {
     return () => {
       leafTexture?.dispose();
+      mossTexture?.dispose();
     };
-  }, [leafTexture]);
+  }, [leafTexture, mossTexture]);
 
   const leafMaterial = useMemo(() => {
     if (!leafTexture) {
@@ -830,13 +1227,37 @@ const BioticOverlays = ({ seed, age, colorAgnostic }: BioticOverlaysProps) => {
       map: leafTexture,
       alphaMap: leafTexture,
       transparent: true,
+      depthTest: true,
       depthWrite: false,
       side: THREE.DoubleSide,
       roughness: 0.92,
       metalness: 0.0,
-      opacity: 0.85,
+      opacity: 0.92,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
     });
   }, [leafTexture, colorAgnostic]);
+
+  const mossCardMaterial = useMemo(() => {
+    if (!mossTexture) {
+      return null;
+    }
+    return new THREE.MeshStandardMaterial({
+      color: colorAgnostic ? "#cfcfcf" : "#6fa66d",
+      map: mossTexture,
+      alphaMap: mossTexture,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      roughness: 0.92,
+      metalness: 0.0,
+      opacity: 0.8,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+  }, [mossTexture, colorAgnostic]);
 
   const leafGeometry = useMemo(() => new THREE.PlaneGeometry(1, 1), []);
   const nodeGeometry = useMemo(() => new THREE.SphereGeometry(1, 10, 10), []);
@@ -852,6 +1273,7 @@ const BioticOverlays = ({ seed, age, colorAgnostic }: BioticOverlaysProps) => {
   const nodeRef = useRef<THREE.InstancedMesh>(null);
   const mossRef = useRef<THREE.InstancedMesh>(null);
   const leafRef = useRef<THREE.InstancedMesh>(null);
+  const mossCardRef = useRef<THREE.InstancedMesh>(null);
 
   useEffect(() => {
     if (!enableNodes || !nodeRef.current) {
@@ -890,9 +1312,10 @@ const BioticOverlays = ({ seed, age, colorAgnostic }: BioticOverlaysProps) => {
     const temp = new THREE.Object3D();
     const forward = new THREE.Vector3(0, 0, 1);
     overlayData.leafNormals.forEach((normal, index) => {
-      const scale = overlayData.leafScales[index] ?? 0.08;
+      const scale = overlayData.leafScales[index] ?? 0.07;
       const roll = overlayData.leafRolls[index] ?? 0;
-      const radius = overlayData.surfaceRadius ?? 1.02;
+      const radius =
+        overlayData.leafRadii[index] ?? overlayData.surfaceRadius ?? 1.02;
       const position = normal.clone().multiplyScalar(radius);
       const quat = new THREE.Quaternion().setFromUnitVectors(forward, normal);
       const rollQuat = new THREE.Quaternion().setFromAxisAngle(normal, roll);
@@ -904,33 +1327,80 @@ const BioticOverlays = ({ seed, age, colorAgnostic }: BioticOverlaysProps) => {
       leafRef.current?.setMatrixAt(index, temp.matrix);
     });
     leafRef.current.instanceMatrix.needsUpdate = true;
-  }, [overlayData.leafNormals, overlayData.leafScales, overlayData.leafRolls, overlayData.surfaceRadius]);
+  }, [
+    overlayData.leafNormals,
+    overlayData.leafScales,
+    overlayData.leafRolls,
+    overlayData.leafRadii,
+    overlayData.surfaceRadius,
+  ]);
 
-  if (overlayData.vineGeometries.length === 0) {
-    return null;
-  }
+  useEffect(() => {
+    if (!mossCardRef.current) {
+      return;
+    }
+    const temp = new THREE.Object3D();
+    const forward = new THREE.Vector3(0, 0, 1);
+    overlayData.mossCardNormals.forEach((normal, index) => {
+      const scale = overlayData.mossCardScales[index] ?? 0.06;
+      const roll = overlayData.mossCardRolls[index] ?? 0;
+      const radius =
+        overlayData.mossCardRadii[index] ?? overlayData.surfaceRadius ?? 1.02;
+      const position = normal.clone().multiplyScalar(radius);
+      const quat = new THREE.Quaternion().setFromUnitVectors(forward, normal);
+      const rollQuat = new THREE.Quaternion().setFromAxisAngle(normal, roll);
+      quat.multiply(rollQuat);
+      temp.position.copy(position);
+      temp.quaternion.copy(quat);
+      temp.scale.setScalar(scale);
+      temp.updateMatrix();
+      mossCardRef.current?.setMatrixAt(index, temp.matrix);
+    });
+    mossCardRef.current.instanceMatrix.needsUpdate = true;
+  }, [
+    overlayData.mossCardNormals,
+    overlayData.mossCardScales,
+    overlayData.mossCardRolls,
+    overlayData.mossCardRadii,
+    overlayData.surfaceRadius,
+  ]);
 
   return (
-    <group>
+    <group renderOrder={2}>
+      {mossCardMaterial && overlayData.mossCardNormals.length > 0 ? (
+        <instancedMesh
+          ref={mossCardRef}
+          args={[leafGeometry, mossCardMaterial, overlayData.mossCardNormals.length]}
+          renderOrder={3}
+        />
+      ) : null}
       {leafMaterial && overlayData.leafNormals.length > 0 ? (
         <instancedMesh
           ref={leafRef}
           args={[leafGeometry, leafMaterial, overlayData.leafNormals.length]}
+          renderOrder={4}
         />
       ) : null}
       {overlayData.vineGeometries.map((geom, index) => (
-        <mesh key={`vine-${index}`} geometry={geom} material={vineMaterial} />
+        <mesh
+          key={`vine-${index}`}
+          geometry={geom}
+          material={vineMaterial}
+          renderOrder={2}
+        />
       ))}
       {enableNodes && overlayData.nodePoints.length > 0 ? (
         <instancedMesh
           ref={nodeRef}
           args={[nodeGeometry, nodeMaterial, overlayData.nodePoints.length]}
+          renderOrder={2}
         />
       ) : null}
       {overlayData.mossPoints.length > 0 ? (
         <instancedMesh
           ref={mossRef}
           args={[mossGeometry, mossMaterial, overlayData.mossPoints.length]}
+          renderOrder={2}
         />
       ) : null}
     </group>
@@ -986,13 +1456,13 @@ const SymbioteScene = ({
   const seedHash = useMemo(() => hashSeed(seed), [seed]);
   const seedNorm = useMemo(() => (seedHash / 4294967295) * 10, [seedHash]);
   const age = Math.min(1, Math.max(0, cycle / Math.max(1, maxCycle)));
-  const showWireDebug = false;
+  const showTopologyDebug = false;
   const overlaySeed = useMemo(
     () => seedHash ^ (Math.floor(cycle / 400) * 0x9e3779b9),
     [seedHash, cycle],
   );
 
-  const uniforms = useMemo(
+  const uniforms = useMemo<SymbioteUniforms>(
     () => ({
       u_time: { value: 0 },
       u_cycle: { value: 0 },
@@ -1014,42 +1484,72 @@ const SymbioteScene = ({
     }),
     [seedNorm],
   );
+  const uniformsRef = useRef(uniforms);
 
   useEffect(() => {
-    uniforms.u_cycle.value = cycle;
-  }, [cycle, uniforms]);
+    uniformsRef.current = uniforms;
+  }, [uniforms]);
 
   useEffect(() => {
-    uniforms.u_age.value = age;
-  }, [age, uniforms]);
-
-  useEffect(() => {
-    uniforms.u_seed.value = seedNorm;
-  }, [seedNorm, uniforms]);
-
-  useEffect(() => {
-    uniforms.u_colorAgnostic.value = colorAgnostic ? 1 : 0;
-  }, [colorAgnostic, uniforms]);
-
-  useEffect(() => {
-    if (!snapshot) {
-      uniforms.u_vitality.value = 0.6;
-      uniforms.u_veinGrowth.value = 0.4;
-      uniforms.u_moss.value = 0.35;
-      uniforms.u_lichen.value = 0.3;
-      uniforms.u_stiffness.value = 0.5;
-      uniforms.u_patchCoverage.value = Math.min(1, 0.35 + 0.8 * age);
+    if (!uniformsRef.current) {
       return;
     }
-    uniforms.u_vitality.value = snapshot.uniforms.u_vitality ?? 0.6;
-    uniforms.u_veinGrowth.value = Math.max(
+    uniformsRef.current.u_cycle.value = cycle;
+  }, [cycle]);
+
+  useEffect(() => {
+    if (!uniformsRef.current) {
+      return;
+    }
+    uniformsRef.current.u_age.value = age;
+  }, [age]);
+
+  useEffect(() => {
+    if (!uniformsRef.current) {
+      return;
+    }
+    uniformsRef.current.u_seed.value = seedNorm;
+  }, [seedNorm]);
+
+  useEffect(() => {
+    if (!uniformsRef.current) {
+      return;
+    }
+    uniformsRef.current.u_colorAgnostic.value = colorAgnostic ? 1 : 0;
+  }, [colorAgnostic]);
+
+  useEffect(() => {
+    const currentUniforms = uniformsRef.current;
+    if (!currentUniforms) {
+      return;
+    }
+    const bioticInfluence = lastBioticDensity;
+    if (!snapshot) {
+      currentUniforms.u_vitality.value = 0.6;
+      currentUniforms.u_veinGrowth.value = 0.4;
+      currentUniforms.u_moss.value = 0.35;
+      currentUniforms.u_lichen.value = 0.3;
+      currentUniforms.u_stiffness.value = clamp(
+        0.5 * (1 - 0.08 * bioticInfluence),
+        0,
+        1,
+      );
+      currentUniforms.u_patchCoverage.value = Math.min(1, 0.35 + 0.8 * age);
+      return;
+    }
+    currentUniforms.u_vitality.value = snapshot.uniforms.u_vitality ?? 0.6;
+    currentUniforms.u_veinGrowth.value = Math.max(
       snapshot.uniforms.u_veinGrowth ?? 0.4,
       0.25 + 0.7 * age,
     );
-    uniforms.u_moss.value = snapshot.plantWeightsRaw.moss ?? 0.35;
-    uniforms.u_lichen.value = snapshot.uniforms.u_lichenCoverage ?? 0.3;
-    uniforms.u_stiffness.value = snapshot.uniforms.u_stiffness ?? 0.5;
-    uniforms.u_patchCoverage.value = Math.min(
+    currentUniforms.u_moss.value = snapshot.plantWeightsRaw.moss ?? 0.35;
+    currentUniforms.u_lichen.value = snapshot.uniforms.u_lichenCoverage ?? 0.3;
+    currentUniforms.u_stiffness.value = clamp(
+      (snapshot.uniforms.u_stiffness ?? 0.5) * (1 - 0.08 * bioticInfluence),
+      0,
+      1,
+    );
+    currentUniforms.u_patchCoverage.value = Math.min(
       1,
       Math.max(
         snapshot.plantWeightsRaw.moss ?? 0,
@@ -1057,14 +1557,18 @@ const SymbioteScene = ({
         0.35 + 0.8 * age,
       ),
     );
-  }, [snapshot, uniforms]);
+  }, [snapshot, age]);
 
   useFrame((_, delta) => {
-    if (reducedMotion) {
-      uniforms.u_time.value = 0;
+    const currentUniforms = uniformsRef.current;
+    if (!currentUniforms) {
       return;
     }
-    uniforms.u_time.value += delta;
+    if (reducedMotion) {
+      currentUniforms.u_time.value = 0;
+      return;
+    }
+    currentUniforms.u_time.value += delta;
   });
 
   const scale = useMemo(() => {
@@ -1082,15 +1586,15 @@ const SymbioteScene = ({
   return (
     <>
       <SymbioteMesh uniforms={uniforms} scale={scale} />
-      {showWireDebug ? (
-        <>
-          <VeinShell uniforms={uniforms} scale={scale} />
-          <BioticOverlays
-            seed={overlaySeed}
-            age={age}
-            colorAgnostic={colorAgnostic}
-          />
-        </>
+      {showTopologyDebug ? <VeinShell uniforms={uniforms} scale={scale} /> : null}
+      {age >= 0.15 ? (
+        <BioticOverlays
+          seed={overlaySeed}
+          cycle={cycle}
+          seedNorm={seedNorm}
+          age={age}
+          colorAgnostic={colorAgnostic}
+        />
       ) : null}
     </>
   );

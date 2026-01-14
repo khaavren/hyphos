@@ -13,6 +13,50 @@ import { OrbitControls } from "@react-three/drei";
 import OrganismSDF from "./components/OrganismSDF";
 import EnvironmentRenderer from "./components/EnvironmentRenderer";
 
+const advanceOneCycle = (
+  currentGenome: Genome,
+  currentEnvironment: Environment,
+  currentCycle: number,
+) => {
+  const nextEnvironment = createCycleEnvironment(currentEnvironment);
+  const result = runCycle(currentGenome, nextEnvironment);
+
+  let nextGenome = currentGenome;
+  let cycleBase = currentCycle;
+  if (result.survived) {
+    if (result.mutatedGenome) {
+      nextGenome = result.mutatedGenome;
+    }
+  } else {
+    console.log("Organism died of: " + result.causeOfDeath);
+    nextGenome = createInitialGenome();
+    cycleBase = 0;
+  }
+
+  return {
+    genome: nextGenome,
+    environment: nextEnvironment,
+    cycleCount: cycleBase + 1,
+  };
+};
+
+const hashString = (input: string) => {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+};
+
+const hashValue = (value: unknown) => {
+  try {
+    return hashString(JSON.stringify(value));
+  } catch {
+    return "????????";
+  }
+};
+
 export default function Home() {
   const initialState = useMemo(() => {
     const g = createInitialGenome();
@@ -27,6 +71,10 @@ export default function Home() {
   const [nodeTree, setNodeTree] = useState<RenderNode>(initialState.nodeTree);
   const [cycleCount, setCycleCount] = useState(0);
   const [autoRun, setAutoRun] = useState(false);
+  const genomeHash = useMemo(() => hashValue(genome), [genome]);
+  const phenotypeHash = useMemo(() => hashValue(phenotype), [phenotype]);
+  const rendersLegs = genome.limbCount > 0.6 && genome.locomotionMode > 0.6;
+  const creatureLabel = rendersLegs ? 'Arthropod Walker' : 'Protoform Swimmer';
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -37,35 +85,34 @@ export default function Home() {
     setNodeTree(nodes);
   }, []);
 
+  useEffect(() => {
+    updateVisuals(genome, environment);
+  }, [genome, environment, cycleCount, updateVisuals]);
+
   const handleCycle = useCallback(() => {
+    const { genome: nextGenome, environment: nextEnvironment, cycleCount: nextCycle } =
+      advanceOneCycle(genome, environment, cycleCount);
+    setGenome(nextGenome);
+    setEnvironment(nextEnvironment);
+    setCycleCount(nextCycle);
+  }, [cycleCount, environment, genome]);
 
-    // 1. Advance Environment
-    const nextEnv = createCycleEnvironment(environment);
-
-    // 2. Run Evolutionary Cycle (Selection + Mutation)
-    const result = runCycle(genome, nextEnv);
-
-    // 3. Update State
+  const handleJump = useCallback(() => {
     let nextGenome = genome;
-    if (result.survived) {
-      if (result.mutatedGenome) {
-        nextGenome = result.mutatedGenome;
-      }
-      // If no mutation, genome stays same
-    } else {
-      // Extinction - Reset for now (or could show death screen)
-      console.log("Organism died of: " + result.causeOfDeath);
-      nextGenome = createInitialGenome(); // Respawn as single cell
-      setCycleCount(0); // Reset age
+    let nextEnvironment = environment;
+    let nextCycle = cycleCount;
+
+    for (let i = 0; i < 20000; i += 1) {
+      const result = advanceOneCycle(nextGenome, nextEnvironment, nextCycle);
+      nextGenome = result.genome;
+      nextEnvironment = result.environment;
+      nextCycle = result.cycleCount;
     }
 
     setGenome(nextGenome);
-    setEnvironment(nextEnv);
-    setCycleCount((c) => c + 1);
-
-    // 4. Update Visuals
-    updateVisuals(nextGenome, nextEnv);
-  }, [environment, genome, updateVisuals]);
+    setEnvironment(nextEnvironment);
+    setCycleCount(nextCycle);
+  }, [cycleCount, environment, genome]);
 
   useEffect(() => {
     if (autoRun) {
@@ -90,47 +137,12 @@ export default function Home() {
           <div className="text-right">
             <div className="text-xs text-gray-500 uppercase tracking-widest">Cycle</div>
             <div className="text-2xl font-mono text-white">{cycleCount}</div>
+            <div className="text-[10px] text-gray-500 font-mono">
+              G:{genomeHash} P:{phenotypeHash}
+            </div>
           </div>
           <button
-            onClick={() => {
-              const elderGenome: Genome = {
-                ...createInitialGenome(),
-                bodySize: 0.95,
-                segmentation: 0.9,
-                limbCount: 0.9,
-                limbLength: 0.8,
-                locomotionMode: 0.8,
-                symmetry: 0.8,
-                rigidity: 0.8,
-                mutationRate: 0.01
-              };
-              setGenome(elderGenome);
-              setCycleCount(20000);
-              updateVisuals(elderGenome, environment);
-            }}
-            className="px-4 py-2 bg-purple-900/50 hover:bg-purple-800 border border-purple-500 text-purple-200 rounded-full font-bold text-xs"
-          >
-            JUMP 20k
-          </button>
-          <button
-            onClick={() => {
-              // SIMULATE 20,000 CYCLES (Approximated by setting max complexity)
-              const elderGenome: Genome = {
-                ...createInitialGenome(),
-                bodySize: 0.95, // Huge
-                segmentation: 0.9, // Many segments
-                limbCount: 0.9, // Many limbs
-                limbLength: 0.8, // Long limbs
-                locomotionMode: 0.8, // Complex locomotion
-                symmetry: 0.8,
-                rigidity: 0.8,
-                mutationRate: 0.01 // Stablized
-              };
-              setGenome(elderGenome);
-              setCycleCount(20000);
-              // Force visuals update
-              updateVisuals(elderGenome, environment);
-            }}
+            onClick={handleJump}
             className="px-4 py-2 bg-purple-900/50 hover:bg-purple-800 border border-purple-500 text-purple-200 rounded-full font-bold text-xs"
           >
             JUMP 20k
@@ -162,7 +174,7 @@ export default function Home() {
           <div className="w-full h-full">
             <Canvas camera={{ position: [0, 0, 50], fov: 45 }} shadows>
               <EnvironmentRenderer env={environment} />
-              <OrganismSDF rootNode={nodeTree} phenotype={phenotype} />
+              <OrganismSDF rootNode={nodeTree} phenotype={phenotype} genome={genome} />
               <OrbitControls enableZoom={true} />
             </Canvas>
           </div>
@@ -173,7 +185,7 @@ export default function Home() {
               {cycleCount < 20 ? 'Primordial Single Cell' : cycleCount < 60 ? 'Developing Organism' : 'Complex Lifeform'}
             </div>
             <div className="text-sm text-gray-300 capitalize mt-1">
-              {phenotype.bodyPlan.replace('_', ' ')} • {phenotype.locomotion}
+              {creatureLabel} • {phenotype.locomotion}
             </div>
           </div>
         </div>

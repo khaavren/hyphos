@@ -1,22 +1,32 @@
-import React, { useMemo, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { RenderNode } from '../../lib/rendering/types';
-import { Phenotype } from '../../lib/simulation/types';
+import { Genome, Phenotype } from '../../lib/simulation/types';
 import { sdfVertexShader, sdfFragmentShader } from '../../lib/rendering/sdfShader';
 
 interface OrganismSDFProps {
     rootNode: RenderNode;
     phenotype: Phenotype;
+    genome: Genome;
 }
 
 // Fixed size arrays for shader uniforms
 const MAX_BLOBS = 50;
 const MAX_CAPSULES = 50;
+const clamp = (value: number, min: number, max: number) =>
+    Math.min(max, Math.max(min, value));
 
-export default function OrganismSDF({ rootNode, phenotype }: OrganismSDFProps) {
+export default function OrganismSDF({ rootNode, phenotype, genome }: OrganismSDFProps) {
     const meshRef = useRef<THREE.Mesh>(null);
+    const legsRef = useRef<THREE.InstancedMesh>(null);
     const { camera } = useThree();
+    const segmentationEnabled = genome.segmentation > 0.6;
+    const legsEnabled = genome.limbCount > 0.6 && genome.locomotionMode > 0.6;
+    const segmentCount = Math.max(1, phenotype.segmentCount);
+    const segmentSpacing = phenotype.axialScale[0] * 1.8;
+    const bodyRadius = Math.max(rootNode.scale.y, rootNode.scale.x * 0.35) * 0.5;
+    const ringThickness = Math.max(0.12, bodyRadius * 0.12);
 
     const uniforms = useMemo(() => ({
         u_time: { value: 0 },
@@ -39,6 +49,121 @@ export default function OrganismSDF({ rootNode, phenotype }: OrganismSDFProps) {
         u_skinRoughness: { value: 0.5 },
         u_wetness: { value: 0.0 }
     }), []);
+
+    const ringGeometry = useMemo(() => {
+        if (!segmentationEnabled) {
+            return null;
+        }
+        return new THREE.CylinderGeometry(bodyRadius, bodyRadius, ringThickness, 18, 1, true);
+    }, [segmentationEnabled, bodyRadius, ringThickness]);
+
+    const ringMaterial = useMemo(() => {
+        const color = new THREE.Color(rootNode.color).multiplyScalar(0.75);
+        return new THREE.MeshStandardMaterial({
+            color,
+            roughness: 0.85,
+            metalness: 0.05,
+            transparent: true,
+            opacity: 0.85
+        });
+    }, [rootNode.color]);
+
+    const legGeometry = useMemo(() => {
+        if (!legsEnabled) {
+            return null;
+        }
+        return new THREE.CylinderGeometry(1, 1, 1, 10, 1);
+    }, [legsEnabled]);
+
+    const legMaterial = useMemo(() => {
+        const color = new THREE.Color(rootNode.color).multiplyScalar(0.55);
+        return new THREE.MeshStandardMaterial({
+            color,
+            roughness: 0.9,
+            metalness: 0.05
+        });
+    }, [rootNode.color]);
+
+    useEffect(() => {
+        return () => {
+            ringGeometry?.dispose();
+        };
+    }, [ringGeometry]);
+
+    useEffect(() => {
+        return () => {
+            ringMaterial.dispose();
+        };
+    }, [ringMaterial]);
+
+    useEffect(() => {
+        return () => {
+            legGeometry?.dispose();
+        };
+    }, [legGeometry]);
+
+    useEffect(() => {
+        return () => {
+            legMaterial.dispose();
+        };
+    }, [legMaterial]);
+
+    const ringPositions = useMemo(() => {
+        if (!segmentationEnabled) {
+            return [];
+        }
+        return Array.from({ length: segmentCount }, (_, index) => index * segmentSpacing);
+    }, [segmentationEnabled, segmentCount, segmentSpacing]);
+
+    const legMatrices = useMemo(() => {
+        if (!legsEnabled) {
+            return [];
+        }
+        const totalLegs = clamp(
+            Math.round(6 + ((genome.limbCount - 0.6) / 0.4) * 4),
+            6,
+            10
+        );
+        const legPairs = Math.max(3, Math.floor(totalLegs / 2));
+        const legLength = Math.max(1.2, phenotype.limbLength * 0.6);
+        const legRadius = Math.max(0.12, phenotype.limbThickness * 0.35);
+        const legYOffset = -bodyRadius - legLength * 0.5;
+        const legZOffset = bodyRadius * 0.55;
+
+        const temp = new THREE.Object3D();
+        const matrices: THREE.Matrix4[] = [];
+
+        for (let i = 0; i < legPairs; i += 1) {
+            const segmentIndex = i % segmentCount;
+            const x = segmentSpacing * (segmentIndex + 0.5);
+            for (const side of [-1, 1]) {
+                temp.position.set(x, legYOffset, side * legZOffset);
+                temp.rotation.set(0, 0, 0);
+                temp.scale.set(legRadius, legLength, legRadius);
+                temp.updateMatrix();
+                matrices.push(temp.matrix.clone());
+            }
+        }
+        return matrices;
+    }, [
+        legsEnabled,
+        genome.limbCount,
+        phenotype.limbLength,
+        phenotype.limbThickness,
+        bodyRadius,
+        segmentCount,
+        segmentSpacing
+    ]);
+
+    useEffect(() => {
+        if (!legsRef.current) {
+            return;
+        }
+        legMatrices.forEach((matrix, index) => {
+            legsRef.current?.setMatrixAt(index, matrix);
+        });
+        legsRef.current.instanceMatrix.needsUpdate = true;
+    }, [legMatrices]);
 
     // DEBUG: Log counts occasionally
     useFrame((state) => {
@@ -197,21 +322,38 @@ export default function OrganismSDF({ rootNode, phenotype }: OrganismSDFProps) {
     });
 
     return (
-        // A box large enough to contain the creature
-        <mesh ref={meshRef} position={[0, 0, 0]}>
-            <boxGeometry args={[40, 40, 40]} />
-            <shaderMaterial
-                vertexShader={sdfVertexShader}
-                fragmentShader={sdfFragmentShader}
-                uniforms={uniforms}
-                transparent={true}
-                depthWrite={true}
-                side={THREE.BackSide} // Render on inside of box so we can fly through? Or FrontSide if outside.
-            // Actually optimization: render on FrontSide of a cube.
-            // Standard Raymarching usually renders a full screen quad.
-            // Rendering a Box allows standard ThreeJS depth compositing with other objects if we write depth properly.
-            // For now, FrontSide is fine if camera is outside box.
-            />
-        </mesh>
+        <group>
+            <mesh ref={meshRef} position={[0, 0, 0]}>
+                <boxGeometry args={[40, 40, 40]} />
+                <shaderMaterial
+                    vertexShader={sdfVertexShader}
+                    fragmentShader={sdfFragmentShader}
+                    uniforms={uniforms}
+                    transparent={true}
+                    depthWrite={true}
+                    side={THREE.BackSide}
+                />
+            </mesh>
+            {segmentationEnabled && ringGeometry ? (
+                <group>
+                    {ringPositions.map((x, index) => (
+                        <mesh
+                            key={`segment-ring-${index}`}
+                            geometry={ringGeometry}
+                            material={ringMaterial}
+                            position={[x, 0, 0]}
+                            rotation={[0, 0, Math.PI / 2]}
+                        />
+                    ))}
+                </group>
+            ) : null}
+            {legsEnabled && legGeometry && legMatrices.length > 0 ? (
+                <instancedMesh
+                    key={`legs-${legMatrices.length}`}
+                    ref={legsRef}
+                    args={[legGeometry, legMaterial, legMatrices.length]}
+                />
+            ) : null}
+        </group>
     );
 }

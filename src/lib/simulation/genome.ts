@@ -58,10 +58,43 @@ export function mutateGenome(
         }
     }
 
+    if (parent.locomotionMode < 0.3) {
+        g.locomotionMode += rng() * magnitude * 0.8;
+    }
+    if (parent.limbCount > 0.4 && parent.locomotionMode < 0.4) {
+        g.locomotionMode += 0.1;
+    }
+    if (parent.locomotionMode > 0.3) {
+        g.locomotionMode = Math.max(g.locomotionMode, parent.locomotionMode * 0.85);
+    }
+    if (parent.locomotionMode > 0.35) {
+        g.limbCount += rng() * magnitude * 0.8 + 0.05;
+        g.limbLength += rng() * magnitude * 0.6 + 0.02;
+    }
+    if (parent.segmentation > 0.35) {
+        g.rigidity += rng() * magnitude * 0.6 + 0.03;
+    }
+    if (parent.limbCount > 0.25) {
+        g.limbCount = Math.max(g.limbCount, parent.limbCount * 0.9);
+    }
+    if (parent.rigidity > 0.25) {
+        g.rigidity = Math.max(g.rigidity, parent.rigidity * 0.9);
+    }
+    if (parent.locomotionMode > 0.7 && parent.limbCount > 0.4) {
+        g.limbLength += rng() * magnitude * 0.6 + 0.05;
+    }
+    if (parent.locomotionMode > 0.8 && parent.limbLength < 0.5) {
+        g.locomotionMode -= 0.15;
+    }
+
     // Clamp all to 0..1
     (Object.keys(g) as Array<keyof Genome>).forEach(key => {
         g[key] = Math.max(0, Math.min(1, g[key]));
     });
+    g.mutationRate = Math.max(0.05, g.mutationRate);
+    if (parent.mutationRate < 0.05) {
+        g.mutationRate = Math.max(g.mutationRate, 0.1);
+    }
 
     return g;
 }

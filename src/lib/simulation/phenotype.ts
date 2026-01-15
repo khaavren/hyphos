@@ -1,4 +1,4 @@
-import { BodyPlan, Environment, Genome, LimbType, Phenotype, SkinType } from "./types";
+import { BodyPlan, Environment, Genome, LimbType, LocomotionType, Phenotype, SkinType } from "./types";
 
 /**
  * Deterministically maps a Genome + Environment History to a specific Phenotype.
@@ -8,10 +8,19 @@ export function derivePhenotype(genome: Genome, _env: Environment): Phenotype {
     void _env;
     // 1. Determine Body Plan (Basins of Attraction)
     // We map the 20d genome space into discrete basins.
-    const bodyPlan = determineBodyPlan(genome);
+    const baseBodyPlan = determineBodyPlan(genome);
 
     // 2. Derive Locomotion
-    let locomotion = determineLocomotion(genome, bodyPlan);
+    let locomotion = determineLocomotion(genome, baseBodyPlan);
+
+    // Limb Type
+    let limbType: LimbType = 'leg';
+    if (locomotion === 'fly') limbType = 'wing';
+    else if (locomotion === 'swim') limbType = 'fin';
+    else if (baseBodyPlan === 'arthropod_walker') limbType = 'leg';
+    else if (genome.limbLength > 0.8) limbType = 'tentacle';
+
+    const bodyPlan = determineBodyPlan(genome, locomotion, limbType);
 
     // 3. Derive Appendages
     // Map limbCount 0..1 to 0..8 pairs
@@ -23,23 +32,13 @@ export function derivePhenotype(genome: Genome, _env: Environment): Phenotype {
         locomotion = 'sessile';
     }
     if (bodyPlan === 'arthropod_walker') {
-        limbPairs = Math.max(3, limbPairs);
-        locomotion = 'walk';
+        limbPairs = Math.max(2, limbPairs);
         segmentCount = Math.max(4, segmentCount);
     }
     if (bodyPlan === 'cephalopod_swimmer') {
         locomotion = 'swim';
         segmentCount = Math.min(3, segmentCount);
     }
-
-    // Limb Type
-    let limbType: LimbType = 'leg';
-    if (locomotion === 'swim') limbType = 'fin';
-    if (locomotion === 'fly') limbType = 'wing';
-    if (genome.limbLength > 0.8) limbType = 'tentacle';
-    if (bodyPlan === 'sessile_reef') limbType = 'cilia';
-    if (bodyPlan === 'cephalopod_swimmer') limbType = 'tentacle';
-    if (bodyPlan === 'arthropod_walker') limbType = 'leg';
 
     // 4. Surface Details
     const patchCoverage = genome.waterRetention; // Moss/Algae likes water
@@ -95,41 +94,59 @@ export function derivePhenotype(genome: Genome, _env: Environment): Phenotype {
     };
 }
 
-function determineBodyPlan(g: Genome): BodyPlan {
+function determineBodyPlan(
+    g: Genome,
+    locomotion?: LocomotionType,
+    limbType?: LimbType,
+): BodyPlan {
     // Decision Tree - LOW THRESHOLDS FOR COMPLEXITY
+    if (g.segmentation > 0.5 && g.limbCount > 0.6 && g.rigidity > 0.4) {
+        return 'arthropod_walker';
+    }
 
+    let basePlan: BodyPlan = 'ovoid_generalist';
     // 1. Sessile (Reef) - Rare, only if very low movement
-    if (g.locomotionMode < 0.15) return 'sessile_reef';
+    if (g.locomotionMode < 0.15) basePlan = 'sessile_reef';
 
     // 2. Segmented / Arthropod - VERY COMMON
     // Lowered threshold from 0.6 to 0.3
     if (
-        g.segmentation > 0.55 &&
-        g.rigidity > 0.5 &&
+        g.segmentation > 0.45 &&
+        g.limbCount > 0.55 &&
+        g.rigidity > 0.45 &&
         g.symmetry > 0.55 &&
-        g.locomotionMode > 0.55 &&
-        g.limbCount > 0.5
+        g.locomotionMode > 0.3
     ) {
-        return 'arthropod_walker';
-    }
-    if (g.segmentation > 0.3) {
-        return 'segmented_crawler';
+        basePlan = 'arthropod_walker';
+    } else if (g.segmentation > 0.35) {
+        basePlan = 'segmented_crawler';
     }
 
     // 3. Cephalopod - If flexible and swimming
-    if (g.locomotionMode > 0.6 && g.limbCount < 0.5) return 'cephalopod_swimmer';
-
-    // 4. Default Ovoid
-    return 'ovoid_generalist';
+    if (g.locomotionMode > 0.6 && g.limbCount < 0.5) {
+        basePlan = 'cephalopod_swimmer';
+    }
+    if (locomotion === 'fly') {
+        return limbType === 'wing' ? 'arthropod_walker' : 'segmented_crawler';
+    }
+    return basePlan;
 }
 
 function determineLocomotion(g: Genome, plan: BodyPlan) {
+    if (g.segmentation > 0.5 && g.limbCount > 0.6 && g.rigidity > 0.4) {
+        return 'walk';
+    }
     if (plan === 'sessile_reef') return 'sessile';
     if (plan === 'cephalopod_swimmer') return 'swim';
 
-    if (g.locomotionMode > 0.8) return 'fly';
-    if (g.locomotionMode > 0.5) return 'swim';
+    if (
+        g.locomotionMode > 0.8 &&
+        g.limbCount > 0.45 &&
+        g.limbLength > 0.5 &&
+        g.rigidity > 0.5
+    ) {
+        return 'fly';
+    }
     if (g.rigidity > 0.4) return 'walk';
-
-    return 'crawl';
+    return 'swim';
 }

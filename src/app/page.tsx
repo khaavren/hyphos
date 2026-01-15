@@ -8,20 +8,67 @@ import { runCycle } from "../lib/simulation/evolution";
 import { derivePhenotype } from "../lib/simulation/phenotype";
 import { assembleOrganism } from "../lib/rendering/assembler";
 import { RenderNode } from "../lib/rendering/types";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import OrganismSDF from "./components/OrganismSDF";
 import EnvironmentRenderer from "./components/EnvironmentRenderer";
+import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
+
+const INITIAL_ENVIRONMENT: Environment = {
+  temperature: 0,
+  humidity: 0.5,
+  wind: 0.2,
+  sunlight: 0.5,
+  season: 0.5,
+  circadianPhase: 0.5,
+  travelRate: 0,
+  proximityDensity: 0,
+  volatility: 0.2,
+};
+
+const clamp = (value: number, min: number, max: number) =>
+  Math.min(max, Math.max(min, value));
+
+const CameraFramer = ({
+  phenotype,
+  rootNode,
+  controlsRef,
+}: {
+  phenotype: Phenotype;
+  rootNode: RenderNode;
+  controlsRef: React.MutableRefObject<OrbitControlsImpl | null>;
+}) => {
+  const { camera } = useThree();
+
+  useEffect(() => {
+    const bodyRadius = Math.max(rootNode.scale.x, rootNode.scale.y) * 0.5;
+    const spineLength = phenotype.segmentCount * (phenotype.axialScale[0] * 1.8);
+    const radius = clamp(Math.max(bodyRadius, spineLength * 0.6), 1.2, 40);
+    const targetX = spineLength * 0.3;
+
+    controlsRef.current?.target.set(targetX, 0, 0);
+    controlsRef.current?.update();
+
+    camera.position.set(targetX, 0, radius * 3);
+    camera.near = 0.01;
+    camera.far = radius * 20;
+    camera.updateProjectionMatrix();
+  }, [camera, controlsRef, phenotype, rootNode]);
+
+  return null;
+};
 
 const advanceOneCycle = (
   currentGenome: Genome,
   currentEnvironment: Environment,
-  currentCycle: number,
+  totalCycles: number,
+  organismAge: number,
 ) => {
   const nextEnvironment = createCycleEnvironment(currentEnvironment);
   const result = runCycle(currentGenome, nextEnvironment);
 
   let nextGenome = currentGenome;
+  let nextOrganismAge = organismAge + 1;
   if (result.survived) {
     if (result.mutatedGenome) {
       nextGenome = result.mutatedGenome;
@@ -29,12 +76,14 @@ const advanceOneCycle = (
   } else {
     console.log("Organism died of: " + result.causeOfDeath);
     nextGenome = createInitialGenome();
+    nextOrganismAge = 0;
   }
 
   return {
     genome: nextGenome,
     environment: nextEnvironment,
-    cycleCount: currentCycle + 1,
+    totalCycles: totalCycles + 1,
+    organismAge: nextOrganismAge,
   };
 };
 
@@ -58,7 +107,7 @@ const hashValue = (value: unknown) => {
 export default function Home() {
   const initialState = useMemo(() => {
     const g = createInitialGenome();
-    const e = createCycleEnvironment();
+    const e = { ...INITIAL_ENVIRONMENT };
     const p = derivePhenotype(g, e);
     const nodes = assembleOrganism(p);
     return { genome: g, environment: e, phenotype: p, nodeTree: nodes };
@@ -67,7 +116,8 @@ export default function Home() {
   const [environment, setEnvironment] = useState<Environment>(initialState.environment);
   const [phenotype, setPhenotype] = useState<Phenotype>(initialState.phenotype);
   const [nodeTree, setNodeTree] = useState<RenderNode>(initialState.nodeTree);
-  const [cycleCount, setCycleCount] = useState(0);
+  const [totalCycles, setTotalCycles] = useState(0);
+  const [organismAge, setOrganismAge] = useState(0);
   const [autoRun, setAutoRun] = useState(false);
   const genomeHash = useMemo(() => hashValue(genome), [genome]);
   const phenotypeHash = useMemo(() => hashValue(phenotype), [phenotype]);
@@ -75,6 +125,7 @@ export default function Home() {
   const creatureLabel = rendersLegs ? 'Arthropod Walker' : 'Protoform Swimmer';
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const controlsRef = useRef<OrbitControlsImpl | null>(null);
 
   const updateVisuals = useCallback((g: Genome, e: Environment) => {
     const p = derivePhenotype(g, e);
@@ -85,32 +136,49 @@ export default function Home() {
 
   useEffect(() => {
     updateVisuals(genome, environment);
-  }, [genome, environment, cycleCount, updateVisuals]);
+  }, [genome, environment, updateVisuals]);
+
+  useEffect(() => {
+    setEnvironment(createCycleEnvironment());
+  }, []);
 
   const handleCycle = useCallback(() => {
-    const { genome: nextGenome, environment: nextEnvironment, cycleCount: nextCycle } =
-      advanceOneCycle(genome, environment, cycleCount);
+    const {
+      genome: nextGenome,
+      environment: nextEnvironment,
+      totalCycles: nextTotalCycles,
+      organismAge: nextOrganismAge,
+    } = advanceOneCycle(genome, environment, totalCycles, organismAge);
     setGenome(nextGenome);
     setEnvironment(nextEnvironment);
-    setCycleCount(nextCycle);
-  }, [cycleCount, environment, genome]);
+    setTotalCycles(nextTotalCycles);
+    setOrganismAge(nextOrganismAge);
+  }, [environment, genome, organismAge, totalCycles]);
 
   const handleJump = useCallback(() => {
     let nextGenome = genome;
     let nextEnvironment = environment;
-    let nextCycle = cycleCount;
+    let nextTotalCycles = totalCycles;
+    let nextOrganismAge = organismAge;
 
     for (let i = 0; i < 20000; i += 1) {
-      const result = advanceOneCycle(nextGenome, nextEnvironment, nextCycle);
+      const result = advanceOneCycle(
+        nextGenome,
+        nextEnvironment,
+        nextTotalCycles,
+        nextOrganismAge,
+      );
       nextGenome = result.genome;
       nextEnvironment = result.environment;
-      nextCycle = result.cycleCount;
+      nextTotalCycles = result.totalCycles;
+      nextOrganismAge = result.organismAge;
     }
 
     setGenome(nextGenome);
     setEnvironment(nextEnvironment);
-    setCycleCount(nextCycle);
-  }, [cycleCount, environment, genome]);
+    setTotalCycles(nextTotalCycles);
+    setOrganismAge(nextOrganismAge);
+  }, [environment, genome, organismAge, totalCycles]);
 
   useEffect(() => {
     if (autoRun) {
@@ -134,7 +202,7 @@ export default function Home() {
         <div className="flex gap-4 items-center">
           <div className="text-right">
             <div className="text-xs text-gray-500 uppercase tracking-widest">Cycle</div>
-            <div className="text-2xl font-mono text-white">{cycleCount}</div>
+            <div className="text-2xl font-mono text-white">{totalCycles}</div>
             <div className="text-[10px] text-gray-500 font-mono">
               G:{genomeHash} P:{phenotypeHash}
             </div>
@@ -172,15 +240,20 @@ export default function Home() {
           <div className="w-full h-full">
             <Canvas camera={{ position: [0, 0, 50], fov: 45 }} shadows>
               <EnvironmentRenderer env={environment} />
+              <CameraFramer
+                phenotype={phenotype}
+                rootNode={nodeTree}
+                controlsRef={controlsRef}
+              />
               <OrganismSDF rootNode={nodeTree} phenotype={phenotype} genome={genome} />
-              <OrbitControls enableZoom={true} />
+              <OrbitControls ref={controlsRef} enableZoom={true} />
             </Canvas>
           </div>
 
           <div className="absolute bottom-4 left-4 z-10 text-shadow-sm">
-            <div className="text-xs text-gray-400 mb-1">Evolutionary Stage (Cycle {cycleCount})</div>
-            <div className={`text-2xl font-bold capitalize ${cycleCount < 20 ? 'text-blue-400' : cycleCount < 60 ? 'text-green-400' : 'text-purple-400'}`}>
-              {cycleCount < 20 ? 'Primordial Single Cell' : cycleCount < 60 ? 'Developing Organism' : 'Complex Lifeform'}
+            <div className="text-xs text-gray-400 mb-1">Evolutionary Stage (Cycle {totalCycles})</div>
+            <div className={`text-2xl font-bold capitalize ${totalCycles < 20 ? 'text-blue-400' : totalCycles < 60 ? 'text-green-400' : 'text-purple-400'}`}>
+              {totalCycles < 20 ? 'Primordial Single Cell' : totalCycles < 60 ? 'Developing Organism' : 'Complex Lifeform'}
             </div>
             <div className="text-sm text-gray-300 capitalize mt-1">
               {creatureLabel} • {phenotype.locomotion}

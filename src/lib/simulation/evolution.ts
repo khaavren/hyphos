@@ -1,6 +1,10 @@
 import { Environment, Genome } from "./types";
 import { mutateGenome } from "./genome"; // We will implement this next
 
+let cycleCount = 0;
+let lowMutationStreak = 0;
+const LOW_MUTATION_STREAK_LIMIT = 200;
+
 export interface CycleResult {
     survived: boolean;
     energyDelta: number;
@@ -10,6 +14,12 @@ export interface CycleResult {
 }
 
 export function runCycle(genome: Genome, env: Environment): CycleResult {
+    const currentCycle = (cycleCount += 1);
+    if (genome.mutationRate < 0.05) {
+        lowMutationStreak += 1;
+    } else {
+        lowMutationStreak = 0;
+    }
     const result: CycleResult = {
         survived: true,
         energyDelta: 0,
@@ -35,6 +45,14 @@ export function runCycle(genome: Genome, env: Environment): CycleResult {
         foragingSuccess += (1 - genome.aggression) * 0.2 + env.sunlight * 0.5;
     }
 
+    if (genome.locomotionMode > 0.3) {
+        result.stressDelta -= env.volatility * 0.5;
+        foragingSuccess += 0.2;
+        if (genome.locomotionMode > 0.5 && genome.limbCount > 0.3) {
+            foragingSuccess += 0.2;
+        }
+    }
+
     result.energyDelta += foragingSuccess;
 
     // 3. Stress from Environment
@@ -45,6 +63,21 @@ export function runCycle(genome: Genome, env: Environment): CycleResult {
 
     // High volatility causes stress if low rigidity/resilience
     result.stressDelta += env.volatility * (1 - genome.rigidity) * 0.2;
+
+    if (genome.locomotionMode < 0.15 && genome.bodySize > 0.15) {
+        result.stressDelta += 0.6;
+        result.energyDelta -= 0.4;
+    }
+    if (genome.locomotionMode > 0.35 && genome.limbCount < 0.2) {
+        result.stressDelta += 0.5;
+        result.energyDelta -= 0.3;
+    }
+    if (genome.locomotionMode > 0.35 && genome.limbCount > 0.3) {
+        result.energyDelta += 0.25;
+    }
+    if (genome.segmentation > 0.35 && genome.rigidity > 0.3) {
+        result.stressDelta -= env.volatility * 0.35;
+    }
 
     // 4. Survival Check
     // In a real run, we'd track accumulated Energy/Stress. 
@@ -57,9 +90,19 @@ export function runCycle(genome: Genome, env: Environment): CycleResult {
         result.causeOfDeath = "Environmental Stress";
     }
 
+    if (result.survived && lowMutationStreak >= LOW_MUTATION_STREAK_LIMIT) {
+        const magnitude = env.volatility * 0.6 + 0.2;
+        result.mutatedGenome = mutateGenome(genome, magnitude);
+        lowMutationStreak = 0;
+        return result;
+    }
+
     // 5. Mutation Opportunity
     // Stress increases mutation chance (imperative adaptation)
-    const mutationChance = genome.mutationRate + (result.stressDelta * 0.5) + (env.volatility * 0.2);
+    let mutationChance = genome.mutationRate + (result.stressDelta * 0.5) + (env.volatility * 0.2);
+    if (genome.locomotionMode < 0.15 && currentCycle > 2000) {
+        mutationChance += 0.5;
+    }
 
     if (result.survived && Math.random() < mutationChance) {
         // Magnitude depends on volatility

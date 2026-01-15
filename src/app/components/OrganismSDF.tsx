@@ -17,12 +17,35 @@ const MAX_CAPSULES = 50;
 const clamp = (value: number, min: number, max: number) =>
     Math.min(max, Math.max(min, value));
 
+const readCycleCountFromDom = () => {
+    if (typeof document === "undefined") {
+        return 0;
+    }
+    const cycleNode = document.querySelector("div.text-2xl.font-mono");
+    const direct = cycleNode?.textContent?.trim();
+    if (direct) {
+        const value = Number(direct);
+        if (Number.isFinite(value)) {
+            return value;
+        }
+    }
+    const text = document.body.textContent ?? "";
+    const match = text.match(/Evolutionary Stage \(Cycle (\d+)\)/);
+    if (match) {
+        return Number(match[1]);
+    }
+    const fallback = text.match(/\bCycle\s+(\d+)\b/);
+    if (fallback) {
+        return Number(fallback[1]);
+    }
+    return 0;
+};
+
 export default function OrganismSDF({ rootNode, phenotype, genome }: OrganismSDFProps) {
     const meshRef = useRef<THREE.Mesh>(null);
-    const legsRef = useRef<THREE.InstancedMesh>(null);
     const { camera } = useThree();
-    const segmentationEnabled = genome.segmentation > 0.6;
-    const legsEnabled = genome.limbCount > 0.6 && genome.locomotionMode > 0.6;
+    const cycleCountRef = useRef(0);
+    const segmentationEnabled = genome.segmentation > 0.25;
     const segmentCount = Math.max(1, phenotype.segmentCount);
     const segmentSpacing = phenotype.axialScale[0] * 1.8;
     const bodyRadius = Math.max(rootNode.scale.y, rootNode.scale.x * 0.35) * 0.5;
@@ -68,22 +91,6 @@ export default function OrganismSDF({ rootNode, phenotype, genome }: OrganismSDF
         });
     }, [rootNode.color]);
 
-    const legGeometry = useMemo(() => {
-        if (!legsEnabled) {
-            return null;
-        }
-        return new THREE.CylinderGeometry(1, 1, 1, 10, 1);
-    }, [legsEnabled]);
-
-    const legMaterial = useMemo(() => {
-        const color = new THREE.Color(rootNode.color).multiplyScalar(0.55);
-        return new THREE.MeshStandardMaterial({
-            color,
-            roughness: 0.9,
-            metalness: 0.05
-        });
-    }, [rootNode.color]);
-
     useEffect(() => {
         return () => {
             ringGeometry?.dispose();
@@ -97,16 +104,13 @@ export default function OrganismSDF({ rootNode, phenotype, genome }: OrganismSDF
     }, [ringMaterial]);
 
     useEffect(() => {
-        return () => {
-            legGeometry?.dispose();
+        const updateCycleCount = () => {
+            cycleCountRef.current = readCycleCountFromDom();
         };
-    }, [legGeometry]);
-
-    useEffect(() => {
-        return () => {
-            legMaterial.dispose();
-        };
-    }, [legMaterial]);
+        updateCycleCount();
+        const id = window.setInterval(updateCycleCount, 250);
+        return () => window.clearInterval(id);
+    }, []);
 
     const ringPositions = useMemo(() => {
         if (!segmentationEnabled) {
@@ -114,56 +118,6 @@ export default function OrganismSDF({ rootNode, phenotype, genome }: OrganismSDF
         }
         return Array.from({ length: segmentCount }, (_, index) => index * segmentSpacing);
     }, [segmentationEnabled, segmentCount, segmentSpacing]);
-
-    const legMatrices = useMemo(() => {
-        if (!legsEnabled) {
-            return [];
-        }
-        const totalLegs = clamp(
-            Math.round(6 + ((genome.limbCount - 0.6) / 0.4) * 4),
-            6,
-            10
-        );
-        const legPairs = Math.max(3, Math.floor(totalLegs / 2));
-        const legLength = Math.max(1.2, phenotype.limbLength * 0.6);
-        const legRadius = Math.max(0.12, phenotype.limbThickness * 0.35);
-        const legYOffset = -bodyRadius - legLength * 0.5;
-        const legZOffset = bodyRadius * 0.55;
-
-        const temp = new THREE.Object3D();
-        const matrices: THREE.Matrix4[] = [];
-
-        for (let i = 0; i < legPairs; i += 1) {
-            const segmentIndex = i % segmentCount;
-            const x = segmentSpacing * (segmentIndex + 0.5);
-            for (const side of [-1, 1]) {
-                temp.position.set(x, legYOffset, side * legZOffset);
-                temp.rotation.set(0, 0, 0);
-                temp.scale.set(legRadius, legLength, legRadius);
-                temp.updateMatrix();
-                matrices.push(temp.matrix.clone());
-            }
-        }
-        return matrices;
-    }, [
-        legsEnabled,
-        genome.limbCount,
-        phenotype.limbLength,
-        phenotype.limbThickness,
-        bodyRadius,
-        segmentCount,
-        segmentSpacing
-    ]);
-
-    useEffect(() => {
-        if (!legsRef.current) {
-            return;
-        }
-        legMatrices.forEach((matrix, index) => {
-            legsRef.current?.setMatrixAt(index, matrix);
-        });
-        legsRef.current.instanceMatrix.needsUpdate = true;
-    }, [legMatrices]);
 
     // DEBUG: Log counts occasionally
     useFrame((state) => {
@@ -178,10 +132,29 @@ export default function OrganismSDF({ rootNode, phenotype, genome }: OrganismSDF
         const t = state.clock.elapsedTime;
         uniforms.u_time.value = t;
         uniforms.u_cameraPos.value.copy(camera.position);
+        const cycleCount = cycleCountRef.current;
+        const cycleScale = clamp(cycleCount / 10000, 0, 1);
+        const blobScale = 1 + cycleScale * 0.35;
+        const capsuleScale = 1 + cycleScale * 0.5;
+        const capsuleRadiusScale = 1 + cycleScale * 0.2;
+        const minBlobCount = cycleCount > 5000 ? 6 : 0;
 
         // --- flatten Tree to Arrays ---
         let blobCount = 0;
         let capsuleCount = 0;
+
+        const pushBlob = (pos: THREE.Vector3, radius: number) => {
+            if (blobCount >= MAX_BLOBS) return;
+            uniforms.u_blobs.value[blobCount].set(pos.x, pos.y, pos.z, radius);
+            blobCount++;
+        };
+
+        const pushCapsule = (posA: THREE.Vector3, posB: THREE.Vector3, radius: number) => {
+            if (capsuleCount >= MAX_CAPSULES) return;
+            uniforms.u_capsulesA.value[capsuleCount].set(posA.x, posA.y, posA.z);
+            uniforms.u_capsulesB.value[capsuleCount].set(posB.x, posB.y, posB.z, radius);
+            capsuleCount++;
+        };
 
         // Recursive helper to traverse and flatten
         // We must compute WORLD positions.
@@ -208,12 +181,8 @@ export default function OrganismSDF({ rootNode, phenotype, genome }: OrganismSDF
 
             // Apply Animation (Wiggle) - crude approach, applying to position
             // Ideally we'd animate the Matrix, but we'll cheat for the SDF positions
-            if (node.animationTag?.includes('limit')) {
-                // Amplify 'limit' -> likely typo for limb? 
-                // Wait, assembler.ts generates 'limb_X_Y'. Check assembler.ts lines 158.
-                // Indeed, assembler generates 'limb_...' or 'seg_...'.
-                // My animation check above was 'limit'?? That explains why it looked static!
-                // Fixing to 'limb' and boosting range.
+            if (node.animationTag?.includes('limb')) {
+                // Limb swing animation.
                 const speed = phenotype.gaitRate * 5.0;
                 const offset = worldPos.x * 0.5;
                 worldPos.z += Math.sin(t * speed + offset) * 0.5; // Significant Z swipe
@@ -249,8 +218,8 @@ export default function OrganismSDF({ rootNode, phenotype, genome }: OrganismSDF
 
                 // Radius is X scale (thickness)
                 // FORCE THICKER LIMBS: Multiply by 2.0 to ensure visibility against SDF blend
-                const radius = Math.max(0.15, worldScale.x * 0.8); // Min thickness 0.15, scale multiplier increased
-                const len = worldScale.y; // Length
+                const radius = Math.max(0.15, worldScale.x * 0.8) * capsuleRadiusScale; // Min thickness 0.15, scale multiplier increased
+                const len = worldScale.y * capsuleScale; // Length
 
                 // We need to construct the two endpoints in WORLD space.
                 // Center is 'worldPos'. 
@@ -262,19 +231,12 @@ export default function OrganismSDF({ rootNode, phenotype, genome }: OrganismSDF
                 const posA = worldPos.clone().addScaledVector(up, -halfLen);
                 const posB = worldPos.clone().addScaledVector(up, halfLen);
 
-                if (capsuleCount < MAX_CAPSULES) {
-                    uniforms.u_capsulesA.value[capsuleCount].set(posA.x, posA.y, posA.z);
-                    uniforms.u_capsulesB.value[capsuleCount].set(posB.x, posB.y, posB.z, radius);
-                    capsuleCount++;
-                }
+                pushCapsule(posA, posB, radius);
 
             } else {
                 // Sphere (Core, simple blobs)
-                const r = Math.max(worldScale.x, worldScale.y) * 0.5; // Fit to size
-                if (blobCount < MAX_BLOBS) {
-                    uniforms.u_blobs.value[blobCount].set(worldPos.x, worldPos.y, worldPos.z, r);
-                    blobCount++;
-                }
+                const r = Math.max(worldScale.x, worldScale.y) * 0.5 * blobScale; // Fit to size
+                pushBlob(worldPos, r);
             }
 
             // Recurse
@@ -284,13 +246,49 @@ export default function OrganismSDF({ rootNode, phenotype, genome }: OrganismSDF
         const rootMatrix = new THREE.Matrix4(); // Identity
         traverse(rootNode, rootMatrix);
 
+        if (cycleCount > 1000) {
+            const spineCount = Math.max(1, Math.min(6, phenotype.segmentCount));
+            const spineLength = Math.max(rootNode.scale.x, rootNode.scale.y) * 2.2;
+            const spineStep = spineLength / spineCount;
+            const spineStart = -spineLength * 0.5;
+            const spineRadius = Math.max(0.2, bodyRadius * 0.45) * capsuleRadiusScale;
+
+            for (let i = 0; i < spineCount; i += 1) {
+                if (capsuleCount >= MAX_CAPSULES) break;
+                const x0 = spineStart + i * spineStep;
+                const x1 = spineStart + (i + 1) * spineStep;
+                const posA = new THREE.Vector3(x0, 0, 0);
+                const posB = new THREE.Vector3(x1, 0, 0);
+                pushCapsule(posA, posB, spineRadius);
+            }
+        }
+
+        if (minBlobCount > 0 && blobCount < minBlobCount) {
+            const baseRadius = Math.max(0.25, bodyRadius * 0.6) * blobScale;
+            const offsets = [
+                new THREE.Vector3(0, 0, 0),
+                new THREE.Vector3(bodyRadius * 0.5, 0, 0),
+                new THREE.Vector3(-bodyRadius * 0.5, 0, 0),
+                new THREE.Vector3(0, bodyRadius * 0.4, 0),
+                new THREE.Vector3(0, -bodyRadius * 0.4, 0),
+                new THREE.Vector3(0, 0, bodyRadius * 0.4),
+            ];
+            for (let i = 0; i < offsets.length && blobCount < minBlobCount; i += 1) {
+                pushBlob(offsets[i], baseRadius);
+            }
+        }
+
         uniforms.u_blobCount.value = blobCount;
         uniforms.u_capsuleCount.value = capsuleCount;
 
         // Update Color
         uniforms.u_color.value.set(rootNode.color);
         // Body blend: smooth organic merging
-        uniforms.u_blendStrength.value = 0.3 + (1.0 - phenotype.rigidity) * 0.3;
+        uniforms.u_blendStrength.value = clamp(
+            0.35 + (1.0 - phenotype.rigidity) * 0.3 + (cycleCount > 1000 ? 0.15 : 0),
+            0.2,
+            0.95
+        );
         // Limb blend: sharp distinct appendages
         uniforms.u_limbBlendStrength.value = 0.1 + phenotype.rigidity * 0.1; // 0.1-0.2 range for sharpness
         uniforms.u_noiseStrength.value = phenotype.roughness * 0.2;
@@ -346,13 +344,6 @@ export default function OrganismSDF({ rootNode, phenotype, genome }: OrganismSDF
                         />
                     ))}
                 </group>
-            ) : null}
-            {legsEnabled && legGeometry && legMatrices.length > 0 ? (
-                <instancedMesh
-                    key={`legs-${legMatrices.length}`}
-                    ref={legsRef}
-                    args={[legGeometry, legMaterial, legMatrices.length]}
-                />
             ) : null}
         </group>
     );

@@ -11,14 +11,26 @@ export function derivePhenotype(genome: Genome, _env: Environment): Phenotype {
     const bodyPlan = determineBodyPlan(genome);
 
     // 2. Derive Locomotion
-    const locomotion = determineLocomotion(genome, bodyPlan);
+    let locomotion = determineLocomotion(genome, bodyPlan);
 
     // 3. Derive Appendages
     // Map limbCount 0..1 to 0..8 pairs
     let limbPairs = Math.floor(genome.limbCount * 6); // 0 to 5 (actually pairs so 0-10 limbs)
+    let segmentCount = Math.max(1, Math.floor(genome.segmentation * 8)); // 0.05 -> 0 -> 1 segment. 1.0 -> 8 segments.
 
-    if (bodyPlan === 'sessile_reef') limbPairs = 0;
-    if (bodyPlan === 'arthropod_walker') limbPairs = Math.max(2, limbPairs);
+    if (bodyPlan === 'sessile_reef') {
+        limbPairs = 0;
+        locomotion = 'sessile';
+    }
+    if (bodyPlan === 'arthropod_walker') {
+        limbPairs = Math.max(3, limbPairs);
+        locomotion = 'walk';
+        segmentCount = Math.max(4, segmentCount);
+    }
+    if (bodyPlan === 'cephalopod_swimmer') {
+        locomotion = 'swim';
+        segmentCount = Math.min(3, segmentCount);
+    }
 
     // Limb Type
     let limbType: LimbType = 'leg';
@@ -26,6 +38,8 @@ export function derivePhenotype(genome: Genome, _env: Environment): Phenotype {
     if (locomotion === 'fly') limbType = 'wing';
     if (genome.limbLength > 0.8) limbType = 'tentacle';
     if (bodyPlan === 'sessile_reef') limbType = 'cilia';
+    if (bodyPlan === 'cephalopod_swimmer') limbType = 'tentacle';
+    if (bodyPlan === 'arthropod_walker') limbType = 'leg';
 
     // 4. Surface Details
     const patchCoverage = genome.waterRetention; // Moss/Algae likes water
@@ -37,15 +51,24 @@ export function derivePhenotype(genome: Genome, _env: Environment): Phenotype {
     else if (genome.rigidity > 0.7) skinType = 'plated';
     else if (genome.rigidity > 0.4) skinType = 'scaly';
 
+    const baseScale = 0.2 + genome.bodySize * 2.5;
+    const axialMultiplier: Record<BodyPlan, [number, number, number]> = {
+        sessile_reef: [1.05, 0.7, 1.05],
+        segmented_crawler: [1.15, 0.85, 1.1],
+        arthropod_walker: [1.25, 0.8, 1.05],
+        cephalopod_swimmer: [0.9, 1.1, 1.25],
+        ovoid_generalist: [1, 1, 1],
+    };
+
     return {
         bodyPlan,
         skinType,
         axialScale: [
-            0.2 + genome.bodySize * 2.5, // 0.0=0.2 (micro), 1.0=2.7 (huge)
-            (0.2 + genome.bodySize * 2.5) * (genome.symmetry > 0.6 ? 1 : 0.8),
-            0.2 + genome.bodySize * 2.5
+            baseScale * axialMultiplier[bodyPlan][0],
+            baseScale * axialMultiplier[bodyPlan][1] * (genome.symmetry > 0.6 ? 1 : 0.8),
+            baseScale * axialMultiplier[bodyPlan][2],
         ],
-        segmentCount: Math.max(1, Math.floor(genome.segmentation * 8)), // 0.05 -> 0 -> 1 segment. 1.0 -> 8 segments.
+        segmentCount,
         asymmetry: 1 - genome.symmetry,
         rigidity: genome.rigidity,
 
@@ -80,8 +103,16 @@ function determineBodyPlan(g: Genome): BodyPlan {
 
     // 2. Segmented / Arthropod - VERY COMMON
     // Lowered threshold from 0.6 to 0.3
+    if (
+        g.segmentation > 0.55 &&
+        g.rigidity > 0.5 &&
+        g.symmetry > 0.55 &&
+        g.locomotionMode > 0.55 &&
+        g.limbCount > 0.5
+    ) {
+        return 'arthropod_walker';
+    }
     if (g.segmentation > 0.3) {
-        if (g.rigidity > 0.4) return 'arthropod_walker';
         return 'segmented_crawler';
     }
 

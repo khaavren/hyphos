@@ -22,7 +22,6 @@ const advanceOneCycle = (
   const result = runCycle(currentGenome, nextEnvironment);
 
   let nextGenome = currentGenome;
-  let cycleBase = currentCycle;
   if (result.survived) {
     if (result.mutatedGenome) {
       nextGenome = result.mutatedGenome;
@@ -30,13 +29,12 @@ const advanceOneCycle = (
   } else {
     console.log("Organism died of: " + result.causeOfDeath);
     nextGenome = createInitialGenome();
-    cycleBase = 0;
   }
 
   return {
     genome: nextGenome,
     environment: nextEnvironment,
-    cycleCount: cycleBase + 1,
+    cycleCount: currentCycle + 1,
   };
 };
 

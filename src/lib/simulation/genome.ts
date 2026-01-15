@@ -32,35 +32,29 @@ export function createInitialGenome(): Genome {
     };
 }
 
-export function mutateGenome(parent: Genome, magnitude: number = 0.1): Genome {
+export function mutateGenome(
+    parent: Genome,
+    magnitude: number = 0.1,
+    rng: () => number = Math.random,
+): Genome {
     const g = { ...parent };
 
-    // COMPLEXITY RATCHET: Evolution favors complexity over time until a plateau
-    // We add a small positive bias to structural traits if they are low
-    const growthBias = 0.02;
-
     (Object.keys(g) as Array<keyof Genome>).forEach(key => {
-        let change = (Math.random() - 0.5) * magnitude;
+        const change = (rng() - 0.5) * magnitude;
 
-        // Ratchet logic for structural traits
-        if (['bodySize', 'segmentation', 'limbCount', 'limbLength', 'neuralComplexity'].includes(key)) {
-            // It's harder to lose complexity than to gain it (slightly)
-            change += growthBias;
-        }
-
-        if (Math.random() < 0.3) {
+        if (rng() < 0.3) {
             g[key] += change;
         }
     });
 
     // Macro Mutation (rare but impactful) - Boosted for early game
-    if (Math.random() < 0.05 * g.mutationRate) {
-        const key = randomKey(g);
+    if (rng() < 0.05 * g.mutationRate) {
+        const key = randomKey(g, rng);
         // If we are small, favor growing
         if (key === 'bodySize' && g.bodySize < 0.3) {
             g[key] += 0.2;
         } else {
-            g[key] += (Math.random() - 0.5) * 0.5; // Big jump
+            g[key] += (rng() - 0.5) * 0.5; // Big jump
         }
     }
 
@@ -72,9 +66,9 @@ export function mutateGenome(parent: Genome, magnitude: number = 0.1): Genome {
     return g;
 }
 
-function randomKey(g: Genome): keyof Genome {
+function randomKey(g: Genome, rng: () => number): keyof Genome {
     const keys = Object.keys(g) as Array<keyof Genome>;
-    return keys[Math.floor(Math.random() * keys.length)];
+    return keys[Math.floor(rng() * keys.length)];
 }
 
 // Deprecated or used for "Sandbox" mode

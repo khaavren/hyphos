@@ -5,9 +5,10 @@ import { Environment } from '../../lib/simulation/types';
 
 interface EnvironmentRendererProps {
     env: Environment;
+    showAtmosphere?: boolean;
 }
 
-export default function EnvironmentRenderer({ env }: EnvironmentRendererProps) {
+export default function EnvironmentRenderer({ env, showAtmosphere = true }: EnvironmentRendererProps) {
     // warm/cool colors based on temperature
     // -1 (cold) -> Blue/White, 1 (hot) -> Red/Orange
     const skyColor = useMemo(() => {
@@ -54,21 +55,23 @@ export default function EnvironmentRenderer({ env }: EnvironmentRendererProps) {
             <ambientLight intensity={0.2 + env.sunlight * 0.3} />
 
             {/* Particles / Plankton / Dust */}
-            <Sparkles
-                count={100}
-                scale={12}
-                size={2}
-                speed={0.4}
-                opacity={0.5}
-                color={env.temperature < 0 ? "#a0c0ff" : "#fffae0"}
-            />
+            {showAtmosphere ? (
+                <Sparkles
+                    count={100}
+                    scale={12}
+                    size={2}
+                    speed={0.4}
+                    opacity={0.35}
+                    color={env.temperature < 0 ? "#a0c0ff" : "#fffae0"}
+                />
+            ) : null}
 
             {/* Clouds if humid */}
-            {env.humidity > 0.6 && (
-                <group position={[0, 5, -5]}>
-                    <Cloud opacity={0.5} speed={0.4} bounds={[10, 3, 1.5]} segments={20} />
+            {showAtmosphere && env.humidity > 0.6 ? (
+                <group position={[0, 6, -25]}>
+                    <Cloud opacity={0.25} speed={0.4} bounds={[10, 3, 1.5]} segments={20} />
                 </group>
-            )}
+            ) : null}
 
             {/* Stars at night */}
             {env.sunlight < 0.2 && (

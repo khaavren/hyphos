@@ -36,11 +36,18 @@ export function mutateGenome(
     parent: Genome,
     magnitude: number = 0.1,
     rng: () => number = Math.random,
+    bias?: Partial<Record<keyof Genome, number>>,
+    pressure?: Partial<Record<keyof Genome, number>>,
 ): Genome {
     const g = { ...parent };
 
     (Object.keys(g) as Array<keyof Genome>).forEach(key => {
-        const change = (rng() - 0.5) * magnitude;
+        const biasAmount = bias?.[key] ?? 0;
+        const pressureAmount = pressure?.[key] ?? 0;
+        const change =
+            (rng() - 0.5) * magnitude +
+            biasAmount * magnitude * 0.35 +
+            pressureAmount * magnitude * 0.25;
 
         if (rng() < 0.3) {
             g[key] += change;
@@ -50,11 +57,12 @@ export function mutateGenome(
     // Macro Mutation (rare but impactful) - Boosted for early game
     if (rng() < 0.05 * g.mutationRate) {
         const key = randomKey(g, rng);
+        const biasAmount = (bias?.[key] ?? 0) + (pressure?.[key] ?? 0) * 0.4;
         // If we are small, favor growing
         if (key === 'bodySize' && g.bodySize < 0.3) {
-            g[key] += 0.2;
+            g[key] += 0.2 + biasAmount * 0.1;
         } else {
-            g[key] += (rng() - 0.5) * 0.5; // Big jump
+            g[key] += (rng() - 0.5) * 0.5 + biasAmount * 0.15; // Big jump
         }
     }
 

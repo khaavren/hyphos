@@ -5,13 +5,15 @@ import { Genome, Environment, Phenotype } from "../lib/simulation/types";
 import { createInitialGenome } from "../lib/simulation/genome";
 import { createCycleEnvironment } from "../lib/simulation/environment";
 import { runCycle } from "../lib/simulation/evolution";
-import { derivePhenotype } from "../lib/simulation/phenotype";
+import { computeBiomeFitness } from "../lib/simulation/biomeConstraints";
+import { classifyCreature, derivePhenotype } from "../lib/simulation/phenotype";
 import { assembleOrganism } from "../lib/rendering/assembler";
 import { RenderNode } from "../lib/rendering/types";
-import { Canvas, useThree } from "@react-three/fiber";
+import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import OrganismSDF from "./components/OrganismSDF";
 import EnvironmentRenderer from "./components/EnvironmentRenderer";
+import ScaleReference from "./components/ScaleReference";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 
 const INITIAL_ENVIRONMENT: Environment = {
@@ -24,38 +26,33 @@ const INITIAL_ENVIRONMENT: Environment = {
   travelRate: 0,
   proximityDensity: 0,
   volatility: 0.2,
+  biome: "temperate",
 };
 
-const clamp = (value: number, min: number, max: number) =>
-  Math.min(max, Math.max(min, value));
+const CAMERA_POSITION: [number, number, number] = [0, 0, 50];
 
-const CameraFramer = ({
-  phenotype,
-  rootNode,
-  controlsRef,
-}: {
-  phenotype: Phenotype;
-  rootNode: RenderNode;
-  controlsRef: React.MutableRefObject<OrbitControlsImpl | null>;
-}) => {
-  const { camera } = useThree();
+const getWorldBounds = (root: RenderNode) => {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
 
-  useEffect(() => {
-    const bodyRadius = Math.max(rootNode.scale.x, rootNode.scale.y) * 0.5;
-    const spineLength = phenotype.segmentCount * (phenotype.axialScale[0] * 1.8);
-    const radius = clamp(Math.max(bodyRadius, spineLength * 0.6), 1.2, 40);
-    const targetX = spineLength * 0.3;
+  const visit = (node: RenderNode, px: number, py: number) => {
+    const x = px + node.position.x;
+    const y = py + node.position.y;
+    const radius = Math.max(node.scale.x, node.scale.y) * 0.5;
+    minX = Math.min(minX, x - radius);
+    maxX = Math.max(maxX, x + radius);
+    minY = Math.min(minY, y - radius);
+    maxY = Math.max(maxY, y + radius);
+    node.children.forEach((child) => visit(child, x, y));
+  };
 
-    controlsRef.current?.target.set(targetX, 0, 0);
-    controlsRef.current?.update();
-
-    camera.position.set(targetX, 0, radius * 3);
-    camera.near = 0.01;
-    camera.far = radius * 20;
-    camera.updateProjectionMatrix();
-  }, [camera, controlsRef, phenotype, rootNode]);
-
-  return null;
+  visit(root, 0, 0);
+  if (!Number.isFinite(minX)) {
+    return { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+  }
+  return { minX, maxX, minY, maxY };
 };
 
 const advanceOneCycle = (
@@ -63,21 +60,16 @@ const advanceOneCycle = (
   currentEnvironment: Environment,
   totalCycles: number,
   organismAge: number,
+  lockBiome: boolean,
 ) => {
-  const nextEnvironment = createCycleEnvironment(currentEnvironment);
-  const result = runCycle(currentGenome, nextEnvironment);
+  const nextEnvironment = createCycleEnvironment(currentEnvironment, {
+    biome: currentEnvironment.biome,
+    lockBiome,
+  });
+  const result = runCycle(currentGenome, nextEnvironment, { disableDeath: true });
 
-  let nextGenome = currentGenome;
-  let nextOrganismAge = organismAge + 1;
-  if (result.survived) {
-    if (result.mutatedGenome) {
-      nextGenome = result.mutatedGenome;
-    }
-  } else {
-    console.log("Organism died of: " + result.causeOfDeath);
-    nextGenome = createInitialGenome();
-    nextOrganismAge = 0;
-  }
+  const nextGenome = result.mutatedGenome ?? currentGenome;
+  const nextOrganismAge = organismAge + 1;
 
   return {
     genome: nextGenome,
@@ -104,6 +96,26 @@ const hashValue = (value: unknown) => {
   }
 };
 
+const getBiomeTag = (p: Phenotype, env: Environment) => {
+  switch (env.biome) {
+    case "ocean":
+      return "Oceanic";
+    case "desert":
+      return p.armorPlates > 0.45 && p.wetSheen < 0.3 ? "Desert-Plated" : "Desert-Arid";
+    case "forest":
+      return p.ornamentation > 0.6 || p.limbLength > 0.65
+        ? "Forest-Canopy"
+        : "Forest-Grove";
+    case "tundra":
+      return p.roughness > 0.55 || p.limbThickness > 0.6
+        ? "Tundra-Insulated"
+        : "Tundra-Hardy";
+    case "temperate":
+    default:
+      return "Temperate-Generalist";
+  }
+};
+
 export default function Home() {
   const initialState = useMemo(() => {
     const g = createInitialGenome();
@@ -119,13 +131,100 @@ export default function Home() {
   const [totalCycles, setTotalCycles] = useState(0);
   const [organismAge, setOrganismAge] = useState(0);
   const [autoRun, setAutoRun] = useState(false);
+  const [lockBiome, setLockBiome] = useState(false);
+  const [jumpStatus, setJumpStatus] = useState<string | null>(null);
   const genomeHash = useMemo(() => hashValue(genome), [genome]);
   const phenotypeHash = useMemo(() => hashValue(phenotype), [phenotype]);
-  const rendersLegs = genome.limbCount > 0.6 && genome.locomotionMode > 0.6;
-  const creatureLabel = rendersLegs ? 'Arthropod Walker' : 'Protoform Swimmer';
+  const bodyPlanLabel = useMemo(() => {
+    const labels: Record<Phenotype["bodyPlan"], string> = {
+      sessile_reef: "Sessile Reef",
+      segmented_crawler: "Segmented Crawler",
+      arthropod_walker: "Arthropod Walker",
+      cephalopod_swimmer: "Cephalopod Swimmer",
+      ovoid_generalist: "Ovoid Generalist",
+    };
+    return labels[phenotype.bodyPlan] ?? "Unknown Form";
+  }, [phenotype.bodyPlan]);
+  const movementLabel = useMemo(() => {
+    const labels: Record<Phenotype["locomotion"], string> = {
+      sessile: "Sessile",
+      swim: "Swim",
+      crawl: "Crawl",
+      walk: "Walk",
+      glide: "Glide",
+      fly: "Fly",
+      burrow: "Burrow",
+    };
+    return labels[phenotype.locomotion] ?? phenotype.locomotion;
+  }, [phenotype.locomotion]);
+  const limbLabel = useMemo(() => {
+    const labels: Record<Phenotype["limbType"], string> = {
+      fin: "Fin",
+      leg: "Leg",
+      wing: "Wing",
+      tentacle: "Tentacle",
+      cilia: "Cilia",
+    };
+    return labels[phenotype.limbType] ?? phenotype.limbType;
+  }, [phenotype.limbType]);
+  const stageInfo = useMemo(() => classifyCreature(phenotype), [phenotype]);
+  const stageColor = useMemo(() => {
+    switch (stageInfo.stageLabel) {
+      case "Walker":
+        return "text-amber-400";
+      case "Flyer":
+        return "text-sky-400";
+      case "Swimmer":
+        return "text-cyan-400";
+      case "Sessile":
+        return "text-emerald-400";
+      case "Crawler":
+        return "text-lime-400";
+      default:
+        return "text-purple-400";
+    }
+  }, [stageInfo.stageLabel]);
+  const labeledCreature = `${bodyPlanLabel} · ${movementLabel} · ${limbLabel}`;
+  const biomeFitness = useMemo(
+    () => computeBiomeFitness(genome, environment),
+    [genome, environment],
+  );
+  const DEBUG_BIOME = false;
+
+  useEffect(() => {
+    if (!DEBUG_BIOME) return;
+    console.log("[BiomeDebug]", {
+      biome: environment.biome,
+      locomotion: phenotype.locomotion,
+      limbType: phenotype.limbType,
+      wetSheen: phenotype.wetSheen,
+      armorPlates: phenotype.armorPlates,
+      roughness: phenotype.roughness,
+      limbLength: phenotype.limbLength,
+      limbThickness: phenotype.limbThickness,
+      ornamentation: phenotype.ornamentation,
+      segmentCount: phenotype.segmentCount,
+      limbPairs: phenotype.limbPairs,
+      gates: biomeFitness.tags,
+    });
+  }, [DEBUG_BIOME, biomeFitness.tags, environment.biome, phenotype]);
+
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
+  const resetView = useCallback(() => {
+    if (!controlsRef.current) return;
+    controlsRef.current.object.position.set(...CAMERA_POSITION);
+    controlsRef.current.target.set(0, 0, 0);
+    controlsRef.current.update();
+  }, []);
+  const sizeMetrics = useMemo(() => {
+    const bounds = getWorldBounds(nodeTree);
+    const worldLength = bounds.maxX - bounds.minX;
+    const worldHeight = bounds.maxY - bounds.minY;
+    const worldRadius = Math.max(worldLength, worldHeight) * 0.5;
+    return { worldLength, worldRadius };
+  }, [nodeTree]);
 
   const updateVisuals = useCallback((g: Genome, e: Environment) => {
     const p = derivePhenotype(g, e);
@@ -148,12 +247,12 @@ export default function Home() {
       environment: nextEnvironment,
       totalCycles: nextTotalCycles,
       organismAge: nextOrganismAge,
-    } = advanceOneCycle(genome, environment, totalCycles, organismAge);
+    } = advanceOneCycle(genome, environment, totalCycles, organismAge, lockBiome);
     setGenome(nextGenome);
     setEnvironment(nextEnvironment);
     setTotalCycles(nextTotalCycles);
     setOrganismAge(nextOrganismAge);
-  }, [environment, genome, organismAge, totalCycles]);
+  }, [environment, genome, lockBiome, organismAge, totalCycles]);
 
   const handleJump = useCallback(() => {
     let nextGenome = genome;
@@ -167,6 +266,7 @@ export default function Home() {
         nextEnvironment,
         nextTotalCycles,
         nextOrganismAge,
+        lockBiome,
       );
       nextGenome = result.genome;
       nextEnvironment = result.environment;
@@ -178,7 +278,84 @@ export default function Home() {
     setEnvironment(nextEnvironment);
     setTotalCycles(nextTotalCycles);
     setOrganismAge(nextOrganismAge);
-  }, [environment, genome, organismAge, totalCycles]);
+  }, [environment, genome, lockBiome, organismAge, totalCycles]);
+
+  const handleJumpTo100k = useCallback(async () => {
+    if (jumpStatus) return;
+    const target = 100000;
+    if (totalCycles >= target) {
+      console.table({
+        bodyPlan: phenotype.bodyPlan,
+        locomotion: phenotype.locomotion,
+        limbType: phenotype.limbType,
+        limbPairs: phenotype.limbPairs,
+        axialScale: phenotype.axialScale.join(", "),
+        furAmount: phenotype.furAmount,
+        wingArea: phenotype.wingArea,
+        eyeCount: phenotype.eyeCount,
+        eyeSize: phenotype.eyeSize,
+      });
+      return;
+    }
+
+    setJumpStatus(`Jumping ${totalCycles}/${target}`);
+    let nextGenome = genome;
+    let nextEnvironment = environment;
+    let nextTotalCycles = totalCycles;
+    let nextOrganismAge = organismAge;
+    const batchSize = 5000;
+
+    while (nextTotalCycles < target) {
+      const end = Math.min(target, nextTotalCycles + batchSize);
+      for (let i = nextTotalCycles; i < end; i += 1) {
+        const result = advanceOneCycle(
+          nextGenome,
+          nextEnvironment,
+          nextTotalCycles,
+          nextOrganismAge,
+          lockBiome,
+        );
+        nextGenome = result.genome;
+        nextEnvironment = result.environment;
+        nextTotalCycles = result.totalCycles;
+        nextOrganismAge = result.organismAge;
+      }
+      setJumpStatus(`Jumping ${nextTotalCycles}/${target}`);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    setGenome(nextGenome);
+    setEnvironment(nextEnvironment);
+    setTotalCycles(nextTotalCycles);
+    setOrganismAge(nextOrganismAge);
+    setJumpStatus(null);
+
+    const finalPhenotype = derivePhenotype(nextGenome, nextEnvironment);
+    console.table({
+      bodyPlan: finalPhenotype.bodyPlan,
+      locomotion: finalPhenotype.locomotion,
+      limbType: finalPhenotype.limbType,
+      limbPairs: finalPhenotype.limbPairs,
+      axialScale: finalPhenotype.axialScale.join(", "),
+      furAmount: finalPhenotype.furAmount,
+      wingArea: finalPhenotype.wingArea,
+      eyeCount: finalPhenotype.eyeCount,
+      eyeSize: finalPhenotype.eyeSize,
+    });
+  }, [
+    environment,
+    genome,
+    jumpStatus,
+    lockBiome,
+    organismAge,
+    phenotype,
+    totalCycles,
+  ]);
+
+  const applyBiomeDebug = useCallback((biome: Environment["biome"]) => {
+    setLockBiome(true);
+    setEnvironment((prev) => ({ ...prev, biome }));
+  }, []);
 
   useEffect(() => {
     if (autoRun) {
@@ -206,12 +383,22 @@ export default function Home() {
             <div className="text-[10px] text-gray-500 font-mono">
               G:{genomeHash} P:{phenotypeHash}
             </div>
+            <div className="text-[10px] text-gray-500 font-mono">
+              Biome: {environment.biome}
+              {biomeFitness.tags.length > 0 ? ` · ${biomeFitness.tags.join(", ")}` : ""}
+            </div>
           </div>
           <button
             onClick={handleJump}
             className="px-4 py-2 bg-purple-900/50 hover:bg-purple-800 border border-purple-500 text-purple-200 rounded-full font-bold text-xs"
           >
             JUMP 20k
+          </button>
+          <button
+            onClick={handleJumpTo100k}
+            className="px-4 py-2 bg-purple-900/50 hover:bg-purple-800 border border-purple-500 text-purple-200 rounded-full font-bold text-xs"
+          >
+            Jump to 100000
           </button>
           <button
             onClick={() => setAutoRun(!autoRun)}
@@ -225,6 +412,12 @@ export default function Home() {
           >
             Step +1
           </button>
+          <button
+            onClick={resetView}
+            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-full font-bold transition"
+          >
+            Reset View
+          </button>
         </div>
       </div>
 
@@ -233,37 +426,102 @@ export default function Home() {
         <div className="flex-1 bg-gray-900/50 rounded-2xl border border-gray-800 overflow-hidden relative">
           <div className="absolute top-4 left-4 z-10 pointer-events-none">
             <div className="text-xs text-gray-400">Environment</div>
+            <div className="text-white">Biome: {environment.biome}</div>
             <div className="text-white">Temp: {environment.temperature.toFixed(2)}</div>
             <div className="text-white">Vol: {environment.volatility.toFixed(2)}</div>
+            <div className="mt-2 text-xs text-gray-400">Scale</div>
+            <div className="text-white">Genome size: {genome.bodySize.toFixed(2)}</div>
+            <div className="text-white">
+              Axial: {phenotype.axialScale[0].toFixed(2)} / {phenotype.axialScale[1].toFixed(2)} / {phenotype.axialScale[2].toFixed(2)}
+            </div>
+            <div className="text-white">
+              World L: {sizeMetrics.worldLength.toFixed(2)} R: {sizeMetrics.worldRadius.toFixed(2)}
+            </div>
+            <div className="mt-2 text-xs text-gray-400">Phenotype</div>
+            <div className="text-white">
+              {phenotype.bodyPlan} • {phenotype.locomotion} • {phenotype.limbType}
+            </div>
+            <div className="text-white">Limb pairs: {phenotype.limbPairs}</div>
+            <div className="text-white">Fur: {phenotype.furAmount.toFixed(2)}</div>
+            <div className="text-white">Wing area: {phenotype.wingArea.toFixed(2)}</div>
+            <div className="text-white">
+              Eyes: {phenotype.eyeCount} @ {phenotype.eyeSize.toFixed(2)}
+            </div>
           </div>
 
           <div className="w-full h-full">
-            <Canvas camera={{ position: [0, 0, 50], fov: 45 }} shadows>
+            <Canvas camera={{ position: CAMERA_POSITION, fov: 45 }} shadows>
               <EnvironmentRenderer env={environment} />
-              <CameraFramer
-                phenotype={phenotype}
-                rootNode={nodeTree}
-                controlsRef={controlsRef}
-              />
+              <ScaleReference />
               <OrganismSDF rootNode={nodeTree} phenotype={phenotype} genome={genome} />
-              <OrbitControls ref={controlsRef} enableZoom={true} />
+              <OrbitControls ref={controlsRef} enableZoom={false} enablePan={false} />
             </Canvas>
           </div>
 
           <div className="absolute bottom-4 left-4 z-10 text-shadow-sm">
             <div className="text-xs text-gray-400 mb-1">Evolutionary Stage (Cycle {totalCycles})</div>
-            <div className={`text-2xl font-bold capitalize ${totalCycles < 20 ? 'text-blue-400' : totalCycles < 60 ? 'text-green-400' : 'text-purple-400'}`}>
-              {totalCycles < 20 ? 'Primordial Single Cell' : totalCycles < 60 ? 'Developing Organism' : 'Complex Lifeform'}
+            <div className={`text-2xl font-bold capitalize ${stageColor}`}>
+              {stageInfo.stageLabel}
             </div>
             <div className="text-sm text-gray-300 capitalize mt-1">
-              {creatureLabel} • {phenotype.locomotion}
+              {labeledCreature} • {getBiomeTag(phenotype, environment)}
             </div>
+            <div className="text-xs text-gray-400 mt-1">
+              limbs: {phenotype.limbPairs} eyes: {phenotype.eyeCount} segments: {phenotype.segmentCount}
+            </div>
+            {jumpStatus ? (
+              <div className="text-xs text-gray-400 mt-1">{jumpStatus}</div>
+            ) : null}
           </div>
         </div>
 
         {/* Genome Data Panel */}
         <div className="w-80 overflow-y-auto pr-2">
           <h2 className="text-xl font-bold mb-4 text-gray-300 sticky top-0 bg-black py-2">Genome Matrix</h2>
+
+          <div className="mb-6">
+            <div className="text-xs uppercase tracking-widest text-gray-600 mb-2 border-b border-gray-800 pb-1">
+              Biome (debug)
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className={`px-3 py-1 rounded-full text-xs border ${
+                  lockBiome && environment.biome === "marine_coral_reef"
+                    ? "border-cyan-400 text-cyan-200"
+                    : "border-gray-700 text-gray-400"
+                }`}
+                onClick={() => applyBiomeDebug("marine_coral_reef")}
+              >
+                marine_coral_reef
+              </button>
+              <button
+                type="button"
+                className={`px-3 py-1 rounded-full text-xs border ${
+                  lockBiome && environment.biome === "tundra"
+                    ? "border-cyan-400 text-cyan-200"
+                    : "border-gray-700 text-gray-400"
+                }`}
+                onClick={() => applyBiomeDebug("tundra")}
+              >
+                tundra
+              </button>
+              <button
+                type="button"
+                className={`px-3 py-1 rounded-full text-xs border ${
+                  lockBiome && environment.biome === "temperate_rainforest"
+                    ? "border-cyan-400 text-cyan-200"
+                    : "border-gray-700 text-gray-400"
+                }`}
+                onClick={() => applyBiomeDebug("temperate_rainforest")}
+              >
+                temperate_rainforest
+              </button>
+            </div>
+            <div className="text-[10px] text-gray-500 mt-2">
+              lockBiome: {lockBiome ? "true" : "false"}
+            </div>
+          </div>
 
           <div className="space-y-6">
             <TraitSection title="Structural">

@@ -9,18 +9,24 @@ import { v4 as uuidv4 } from "uuid";
  * Deterministic where possible (avoid Math.random for stable outputs).
  */
 export function assembleOrganism(phenotype: Phenotype): RenderNode {
-  const rng = makeRngFromPhenotype(phenotype);
-  const baseColor = getBaseColor(phenotype);
+  const renderAxialScale: [number, number, number] = [
+    clamp(phenotype.axialScale[0], 0.6, 3.2),
+    clamp(phenotype.axialScale[1], 0.6, 3.2),
+    clamp(phenotype.axialScale[2], 0.6, 3.2),
+  ];
+  const renderPhenotype: Phenotype = { ...phenotype, axialScale: renderAxialScale };
+  const rng = makeRngFromPhenotype(renderPhenotype);
+  const baseColor = getBaseColor(renderPhenotype);
 
   // NOTE: Keep core as the origin anchor. For most plans we build a forward chain
   // so that "front" is +X and "down" is -Y (matches the renderer assumptions).
   const core: RenderNode = {
     id: uuidv4(),
     type: "core",
-    shape: phenotype.bodyPlan === "ovoid_generalist" ? "circle" : "oval",
+    shape: renderPhenotype.bodyPlan === "ovoid_generalist" ? "circle" : "oval",
     position: { x: 0, y: 0 },
     rotation: 0,
-    scale: { x: phenotype.axialScale[0] * 2, y: phenotype.axialScale[1] * 2 },
+    scale: { x: renderPhenotype.axialScale[0] * 2, y: renderPhenotype.axialScale[1] * 2 },
     color: baseColor,
     opacity: 1.0,
     zIndex: 100,
@@ -28,31 +34,34 @@ export function assembleOrganism(phenotype: Phenotype): RenderNode {
     animationTag: "core",
   };
 
-  switch (phenotype.bodyPlan) {
+  switch (renderPhenotype.bodyPlan) {
     case "arthropod_walker":
-      buildArthropod(core, phenotype, baseColor);
+      buildArthropod(core, renderPhenotype, baseColor);
       break;
 
     case "segmented_crawler":
-      buildSegmentedCrawler(core, phenotype, baseColor);
+      buildSegmentedCrawler(core, renderPhenotype, baseColor);
       break;
 
     case "cephalopod_swimmer":
-      buildCephalopodBody(core, phenotype, baseColor);
+      buildCephalopodBody(core, renderPhenotype, baseColor);
       break;
 
     case "sessile_reef":
-      buildReefBody(core, phenotype, baseColor, rng);
+      buildReefBody(core, renderPhenotype, baseColor, rng);
       break;
 
     case "ovoid_generalist":
     default:
-      buildOvoid(core, phenotype, baseColor);
+      buildOvoid(core, renderPhenotype, baseColor);
       break;
   }
 
   // Add a tiny directional cue so it never reads as “just a ball”
-  addFaceCue(core, phenotype, baseColor);
+  addFaceCue(core, renderPhenotype, baseColor);
+  applyLocomotionAddons(core, renderPhenotype, baseColor);
+  applyBiomeSurface(core, renderPhenotype, baseColor, rng);
+  centerNodeTree(core);
 
   return core;
 }
@@ -61,22 +70,34 @@ export function assembleOrganism(phenotype: Phenotype): RenderNode {
 
 function buildOvoid(core: RenderNode, p: Phenotype, color: string) {
   // Keep it simple but readable: a tail + feelers so it isn't just a blob.
-  addTail(core, p, color);
+  if (p.tailLength > 0.1) {
+    addTail(core, p, color);
+  }
 
-  if (p.limbPairs > 0) {
+  if (p.locomotion === "walk") {
+    addWalkerLegPairs(core, p, color);
+  } else if (p.locomotion === "fly" || p.locomotion === "glide") {
+    // Flyers can still have legs (per your request), but wings are handled in applyLocomotionAddons.
+    if (p.legPairs > 0) addWalkerLegPairs(core, p, color);
+    addAntennae(core, p, color);
+  } else if (p.limbPairs > 0) {
     // Use non-walker limb layout (radial fins/tentacles).
     addRadialLimbs(core, p, color, 0);
   } else {
-    addFeelers(core, p, color);
+    addAntennae(core, p, color);
+    addWhiskers(core, p, color);
   }
 }
 
 function buildSegmentedCrawler(core: RenderNode, p: Phenotype, color: string) {
   // A single chain of tapered segments extending in +X
   const segCount = Math.max(2, p.segmentCount);
-  const stepX = p.axialScale[0] * 1.35;
+  const maxBodyLength = 18;
+  const maxStep = maxBodyLength / segCount;
+  const stepX = Math.min(p.axialScale[0] * 1.35, maxStep);
 
   let current = core;
+  const segments: RenderNode[] = [];
   for (let i = 0; i < segCount; i += 1) {
     const taper = 1.0 - (i / Math.max(1, segCount - 1)) * 0.55;
 
@@ -97,20 +118,42 @@ function buildSegmentedCrawler(core: RenderNode, p: Phenotype, color: string) {
       animationTag: `seg_${i}`,
     };
 
-    // Add small ventral cilia "feet" for crawling read
-    addCrawlerCilia(segment, p, color, i);
+    if (p.locomotion !== "walk" && (p.limbType === "cilia" || p.limbPairs === 0)) {
+      // Add small ventral cilia "feet" for crawling read
+      addCrawlerCilia(segment, p, color, i);
+    }
 
     current.children.push(segment);
     current = segment;
+    segments.push(segment);
   }
 
-  addTail(current, p, color);
+  if (p.locomotion === "walk" && segments.length > 0) {
+    const pairCount = clampInt(p.legPairs, 3, 6);
+    const legSegments = Math.min(segments.length, Math.max(3, pairCount));
+    for (let i = 0; i < legSegments; i += 1) {
+      const t = legSegments === 1 ? 0.5 : (i + 1) / (legSegments + 1);
+      const idx = clamp(
+        Math.round(lerp(segments.length * 0.2, segments.length * 0.8, t)),
+        0,
+        segments.length - 1,
+      );
+      addWalkerLegPairOnSegment(segments[idx], p, color, i);
+    }
+  }
+
+  if (p.tailLength > 0.1) {
+    addTail(current, p, color);
+  }
 }
 
 function buildArthropod(core: RenderNode, p: Phenotype, color: string) {
   // Build a single readable chain:
   // head -> thorax -> abdomen -> tail segments...
-  const stepX = p.axialScale[0] * 1.25;
+  const segmentTotal = Math.max(3, Math.min(p.segmentCount, 5));
+  const maxBodyLength = 18;
+  const maxStep = maxBodyLength / segmentTotal;
+  const stepX = Math.min(p.axialScale[0] * 1.25, maxStep);
 
   const head: RenderNode = {
     id: uuidv4(),
@@ -162,7 +205,7 @@ function buildArthropod(core: RenderNode, p: Phenotype, color: string) {
   addWalkerLegPairs(thorax, p, color);
 
   // Add a couple of smaller abdominal segments (tapering) to make it read as articulated.
-  const extraSegs = clampInt(Math.max(0, p.segmentCount - 3), 2, 6);
+  const extraSegs = clampInt(Math.max(0, segmentTotal - 3), 0, 2);
   let current = abdomen;
   for (let i = 0; i < extraSegs; i += 1) {
     const taper = 1.0 - (i / Math.max(1, extraSegs)) * 0.65;
@@ -193,15 +236,19 @@ function buildArthropod(core: RenderNode, p: Phenotype, color: string) {
     current = seg;
   }
 
-  addTail(current, p, color);
+  if (p.tailLength > 0.1) {
+    addTail(current, p, color);
+  }
 
   // Antennae/feelers attached to head
-  addFeelers(head, p, color);
+  addAntennae(head, p, color);
+  addWhiskers(head, p, color);
 }
 
 function buildCephalopodBody(core: RenderNode, p: Phenotype, color: string) {
   // Head is the core. Tentacles radiate around it.
-  const totalArms = Math.max(6, p.limbPairs * 2);
+  const totalArms = Math.max(0, p.tentaclePairs * 2);
+  if (totalArms === 0) return;
 
   for (let i = 0; i < totalArms; i += 1) {
     const angle = (i / totalArms) * Math.PI * 2;
@@ -217,14 +264,12 @@ function buildCephalopodBody(core: RenderNode, p: Phenotype, color: string) {
       shape: "path",
       position: { x: attachX, y: attachY },
       rotation: angle,
-      // IMPORTANT: position tentacle center so it starts at the joint
-      // Capsule is centered on node; offset by -len/2 along its local +Y axis.
       scale: { x: Math.max(0.12, p.limbThickness), y: Math.max(1.2, p.limbLength) },
       color: darken(color, 18),
       opacity: 1.0,
       zIndex: 90,
       children: [],
-      animationTag: `tentacle_${i}`, // OrganismSDF animates by "tentacle"
+      animationTag: `tentacle_${i}`,
     };
 
     core.children.push(tentacle);
@@ -254,8 +299,8 @@ function buildReefBody(core: RenderNode, p: Phenotype, color: string, rng: () =>
       animationTag: `polyp_${i}`,
     };
 
-    // Tiny cilia to avoid pure spheres
-    if (i % 2 === 0) {
+    // Tiny cilia only if phenotype invests in cilia
+    if (p.limbType === "cilia" && i % 2 === 0) {
       polyp.children.push(
         makeCapsuleLimb({
           x: 0,
@@ -274,6 +319,256 @@ function buildReefBody(core: RenderNode, p: Phenotype, color: string, rng: () =>
   }
 }
 
+/* ------------------------------ Locomotion / Biome ------------------------------ */
+
+function applyLocomotionAddons(core: RenderNode, p: Phenotype, color: string) {
+  const thorax = findNodeByTag(core, "seg_thorax") ?? core;
+  const abdomen = findNodeByTag(core, "seg_abdomen") ?? core;
+
+  if (p.locomotion === "fly" || p.locomotion === "glide") {
+    addWingPair(thorax, p, color);
+    // Allow flyer legs too (if present)
+    if (p.legPairs > 0 && p.bodyPlan !== "arthropod_walker") {
+      addWalkerLegPairs(thorax, p, color);
+    }
+  }
+
+  if (p.locomotion === "swim") {
+    addSwimmerFins(thorax, p, color);
+    addSwimmerTail(abdomen, p, color);
+    if (p.tailFinSize > 0.1) {
+      addTailFluke(abdomen, p, color);
+    }
+  } else if (p.limbType === "fin" && p.finPairs > 0) {
+    addFinPair(thorax, p, color);
+  }
+}
+
+function applyBiomeSurface(core: RenderNode, p: Phenotype, color: string, rng: () => number) {
+  if (p.biome === "tundra" && p.furAmount > 0.2) {
+    addInsulationNodes(core, p, color, rng);
+  }
+  if (p.biome === "desert" && p.armorPlates > 0.2) {
+    addPlatingNodes(core, p, color, rng);
+  }
+  if (p.ornamentation > 0.35) {
+    addOrnamentNodes(core, p, color, rng);
+  }
+}
+
+function findNodeByTag(node: RenderNode, tag: string): RenderNode | null {
+  if (node.animationTag?.includes(tag)) return node;
+  for (const child of node.children) {
+    const hit = findNodeByTag(child, tag);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/* ------------------------------ Wings / Fins / Tail ------------------------------ */
+
+function addWingPair(parent: RenderNode, p: Phenotype, color: string) {
+  const pairs = clampInt(Math.max(p.wingPairs, 1), 1, 3);
+  const areaBoost = clamp(0.8 + p.wingArea * 2.4, 0.8, 3.2);
+  const span = clamp(p.limbLength * (1.1 + p.wingArea * 2.6), 1.8, 6.8) * areaBoost;
+  const thickness = clamp(p.limbThickness * 0.55, 0.18, 0.55);
+  const offsetX = parent.scale.x * 0.15;
+  const offsetY = parent.scale.y * 0.2;
+
+  for (let i = 0; i < pairs; i += 1) {
+    const t = pairs === 1 ? 0.5 : i / (pairs - 1);
+    const x = lerp(offsetX * 0.6, offsetX * 1.4, t);
+    [-1, 1].forEach((side, idx) => {
+      parent.children.push(
+        makeCapsuleLimb({
+          x,
+          y: side * offsetY,
+          rot: side * 0.55 - 0.2,
+          thickness,
+          length: span,
+          color: darken(color, 10),
+          tag: `limb_wing_${i}_${idx}`,
+          shape: "triangle",
+        }),
+      );
+    });
+  }
+}
+
+function addFinPair(parent: RenderNode, p: Phenotype, color: string) {
+  const pairs = clampInt(p.finPairs, 1, 3);
+  const span = clamp(p.limbLength * 0.6, 0.8, 3.2);
+  const thickness = clamp(p.limbThickness * 0.5, 0.14, 0.35);
+  const offsetX = parent.scale.x * 0.1;
+  const offsetY = parent.scale.y * 0.25;
+
+  for (let i = 0; i < pairs; i += 1) {
+    const t = pairs === 1 ? 0.5 : i / (pairs - 1);
+    const x = lerp(offsetX * 0.4, offsetX * 1.3, t);
+    [-1, 1].forEach((side, idx) => {
+      parent.children.push(
+        makeCapsuleLimb({
+          x,
+          y: side * offsetY,
+          rot: side * 0.4 + 0.15,
+          thickness,
+          length: span,
+          color: darken(color, 14),
+          tag: `limb_fin_${i}_${idx}`,
+          shape: "triangle",
+        }),
+      );
+    });
+  }
+}
+
+function addTailFluke(parent: RenderNode, p: Phenotype, color: string) {
+  const span = clamp(p.limbLength * (0.4 + p.tailFinSize * 0.8), 0.9, 3.6);
+  const thickness = clamp(p.limbThickness * 0.55, 0.16, 0.4);
+  const offsetX = parent.scale.x * 0.65;
+
+  [-1, 1].forEach((side, idx) => {
+    parent.children.push(
+      makeCapsuleLimb({
+        x: offsetX,
+        y: side * parent.scale.y * 0.1,
+        rot: side * 0.55,
+        thickness,
+        length: span,
+        color: darken(color, 16),
+        tag: `limb_fluke_${idx}`,
+        shape: "triangle",
+      }),
+    );
+  });
+}
+
+function addSwimmerFins(parent: RenderNode, p: Phenotype, color: string) {
+  const pairs = clampInt(Math.max(p.finPairs, 1), 1, 3);
+  const span = clamp(p.limbLength * (0.75 + p.tailFinSize * 0.6), 1.0, 3.8);
+  const thickness = clamp(p.limbThickness * 0.55, 0.16, 0.45);
+  const offsetX = parent.scale.x * 0.15;
+  const offsetY = parent.scale.y * 0.3;
+
+  for (let i = 0; i < pairs; i += 1) {
+    const t = pairs === 1 ? 0.5 : i / (pairs - 1);
+    const x = lerp(offsetX * 0.4, offsetX * 1.35, t);
+    [-1, 1].forEach((side, idx) => {
+      parent.children.push(
+        makeCapsuleLimb({
+          x,
+          y: side * offsetY,
+          rot: side * 0.4 + 0.1,
+          thickness,
+          length: span,
+          color: darken(color, 12),
+          tag: `limb_swim_fin_${i}_${idx}`,
+          shape: "triangle",
+        }),
+      );
+    });
+  }
+}
+
+function addSwimmerTail(parent: RenderNode, p: Phenotype, color: string) {
+  const segments = clampInt(Math.round(2 + p.tailLength * 2), 2, 4);
+  const baseLen = clamp(p.axialScale[0] * (0.9 + p.tailLength), 1.4, 5.0);
+  const segmentLen = baseLen / segments;
+  const startX = parent.scale.x * 0.55;
+
+  for (let i = 0; i < segments; i += 1) {
+    const taper = 1 - (i / Math.max(1, segments)) * 0.5;
+    const thickness = clamp(p.axialScale[1] * 0.22 * taper, 0.08, 0.28);
+    parent.children.push(
+      makeCapsuleLimb({
+        x: startX + segmentLen * 0.5 + i * segmentLen * 0.7,
+        y: 0,
+        rot: Math.PI / 2,
+        thickness,
+        length: segmentLen,
+        color: darken(color, 12 + i * 4),
+        tag: `limb_tail_seg_${i}`,
+        shape: "path",
+      }),
+    );
+  }
+}
+
+/* ------------------------------ Surface Extras ------------------------------ */
+
+function addInsulationNodes(core: RenderNode, p: Phenotype, color: string, rng: () => number) {
+  const count = clampInt(Math.round(6 + p.segmentCount * 0.6), 6, 14);
+  const baseX = p.axialScale[0] * 0.65;
+  const baseY = p.axialScale[1] * 0.7;
+
+  for (let i = 0; i < count; i += 1) {
+    const angle = rng() * Math.PI * 2;
+    const size = 0.08 + rng() * 0.14;
+    const node: RenderNode = {
+      id: `fuzz-${uuidv4()}`,
+      type: "body_segment",
+      shape: "circle",
+      position: { x: Math.cos(angle) * baseX, y: Math.sin(angle) * baseY },
+      rotation: 0,
+      scale: { x: size * 1.05, y: size },
+      color: darken(color, 6),
+      opacity: 0.9,
+      zIndex: 96,
+      children: [],
+      animationTag: `fuzz_${i}`,
+    };
+    core.children.push(node);
+  }
+}
+
+function addPlatingNodes(core: RenderNode, p: Phenotype, color: string, rng: () => number) {
+  const count = clampInt(Math.round(4 + p.segmentCount * 0.5), 4, 10);
+  const span = p.axialScale[0] * 1.15;
+  for (let i = 0; i < count; i += 1) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    const x = lerp(-p.axialScale[0] * 0.1, span, t) + (rng() - 0.5) * 0.2;
+    const y = p.axialScale[1] * 0.35 + (rng() - 0.5) * 0.15;
+    const plate: RenderNode = {
+      id: `plate-${uuidv4()}`,
+      type: "body_segment",
+      shape: "oval",
+      position: { x, y },
+      rotation: (rng() - 0.5) * 0.3,
+      scale: { x: 0.25 + rng() * 0.2, y: 0.12 + rng() * 0.1 },
+      color: darken(color, 18),
+      opacity: 0.95,
+      zIndex: 102,
+      children: [],
+      animationTag: `plate_${i}`,
+    };
+    core.children.push(plate);
+  }
+}
+
+function addOrnamentNodes(core: RenderNode, p: Phenotype, color: string, rng: () => number) {
+  const count = clampInt(Math.round(2 + p.ornamentation * 6), 2, 8);
+  const span = p.axialScale[0] * 0.9;
+  for (let i = 0; i < count; i += 1) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    const x = lerp(-p.axialScale[0] * 0.2, span, t);
+    const y = p.axialScale[1] * (0.4 + rng() * 0.4);
+    const size = 0.06 + rng() * 0.12;
+    core.children.push({
+      id: `ornament-${uuidv4()}`,
+      type: "body_segment",
+      shape: "circle",
+      position: { x, y },
+      rotation: 0,
+      scale: { x: size * 1.2, y: size },
+      color: darken(color, 8),
+      opacity: 0.9,
+      zIndex: 120,
+      children: [],
+      animationTag: `ornament_${i}`,
+    });
+  }
+}
+
 /* ------------------------------ Limbs ------------------------------ */
 
 /**
@@ -281,7 +576,7 @@ function buildReefBody(core: RenderNode, p: Phenotype, color: string, rng: () =>
  * Use capsule limbs and position them so they START at the joint.
  */
 function addWalkerLegPairs(thorax: RenderNode, p: Phenotype, color: string) {
-  const pairs = clampInt(p.limbPairs, 3, 6);
+  const pairs = clampInt(p.legPairs, 3, 6);
 
   // Spread legs along thorax x-span (local)
   const spreadX = thorax.scale.x * 0.55;
@@ -295,6 +590,8 @@ function addWalkerLegPairs(thorax: RenderNode, p: Phenotype, color: string) {
 /**
  * Attach a single leg pair to a segment-like node.
  * `xOverride` lets us distribute legs along thorax.
+ *
+ * KEY FIX: widen lateral offset so legs don’t sit on the centerline.
  */
 function addWalkerLegPairOnSegment(
   parent: RenderNode,
@@ -304,10 +601,13 @@ function addWalkerLegPairOnSegment(
   xOverride?: number,
 ) {
   const down = -(parent.scale.y * 0.65);
-  const lateral = parent.scale.y * 0.55;
 
-  const legThk = Math.max(0.12, p.limbThickness * 0.7);
-  const legLen = Math.max(parent.scale.y * 1.35, p.limbLength * 0.55);
+  // ✅ FIX: legs were too close to center; use a stronger lateral based on both axes
+  const lateral = Math.max(parent.scale.y * 0.85, parent.scale.x * 0.35);
+
+  const biomeLegScale = p.biome === "tundra" ? 1.15 : 1.0;
+  const legThk = Math.max(0.16, p.limbThickness * 0.7) * biomeLegScale;
+  const legLen = Math.max(parent.scale.y * 1.55, p.limbLength * 0.65);
 
   const upperLen = legLen * 0.6;
   const lowerLen = legLen * 0.55;
@@ -321,7 +621,6 @@ function addWalkerLegPairOnSegment(
   for (const side of sides) {
     const hipX = hipXBase + side * lateral;
 
-    // Hip blob helps the SDF read joints
     const hip: RenderNode = {
       id: `hip-${uuidv4()}`,
       type: "limb",
@@ -336,11 +635,10 @@ function addWalkerLegPairOnSegment(
       animationTag: `limb_${pairIndex}_${side > 0 ? "R" : "L"}_hip`,
     };
 
-    // Upper leg capsule: IMPORTANT—center is offset so it starts at hip
-    const upperRot = -Math.PI / 2 + side * 0.18 + (pairIndex * 0.03);
+    const upperRot = -Math.PI / 2 + side * 0.18 + pairIndex * 0.03;
     const upper = makeCapsuleLimb({
       x: 0,
-      y: -upperLen * 0.5, // start at hip, extend downward
+      y: -upperLen * 0.5,
       rot: upperRot,
       thickness: legThk,
       length: upperLen,
@@ -349,7 +647,6 @@ function addWalkerLegPairOnSegment(
       shape: "rect",
     });
 
-    // Knee blob
     const knee: RenderNode = {
       id: `knee-${uuidv4()}`,
       type: "limb",
@@ -364,7 +661,6 @@ function addWalkerLegPairOnSegment(
       animationTag: `limb_${pairIndex}_${side > 0 ? "R" : "L"}_knee`,
     };
 
-    // Lower leg capsule: starts at knee, extends downward
     const lowerRot = -Math.PI / 2 + side * 0.06 - 0.25;
     const lower = makeCapsuleLimb({
       x: 0,
@@ -377,14 +673,14 @@ function addWalkerLegPairOnSegment(
       shape: "rect",
     });
 
-    // Foot (tiny toe) helps read ground contact
+    const footScale = p.biome === "tundra" ? 1.35 : 1.0;
     const foot: RenderNode = {
       id: `foot-${uuidv4()}`,
       type: "limb",
       shape: "oval",
       position: { x: 0, y: -lowerLen },
       rotation: 0,
-      scale: { x: legThk * 1.25, y: legThk * 0.85 },
+      scale: { x: legThk * 1.25 * footScale, y: legThk * 0.85 * footScale },
       color: darken(color, 30),
       opacity: 1.0,
       zIndex: 56,
@@ -392,7 +688,6 @@ function addWalkerLegPairOnSegment(
       animationTag: `limb_${pairIndex}_${side > 0 ? "R" : "L"}_foot`,
     };
 
-    // Assemble hierarchy: hip -> upper -> knee -> lower -> foot
     lower.children.push(foot);
     knee.children.push(lower);
     upper.children.push(knee);
@@ -423,7 +718,7 @@ function addRadialLimbs(parent: RenderNode, p: Phenotype, color: string, index: 
       x: attachX,
       y: attachY,
       rot: angle + Math.PI / 2,
-      thickness: Math.max(0.10, p.limbThickness),
+      thickness: Math.max(0.1, p.limbThickness),
       length: Math.max(0.8, p.limbLength),
       color: darken(color, 18),
       tag: `limb_${index}_${s}`,
@@ -459,8 +754,8 @@ function addCrawlerCilia(parent: RenderNode, p: Phenotype, color: string, index:
 }
 
 function addTail(parent: RenderNode, p: Phenotype, color: string) {
-  const len = clamp(p.axialScale[0] * 1.25, 0.9, 3.2);
-  const thick = clamp(p.axialScale[1] * 0.22, 0.10, 0.28);
+  const len = clamp(p.axialScale[0] * (0.6 + p.tailLength * 1.1), 0.9, 3.2);
+  const thick = clamp(p.axialScale[1] * 0.22, 0.1, 0.28);
 
   parent.children.push(
     makeCapsuleLimb({
@@ -476,24 +771,48 @@ function addTail(parent: RenderNode, p: Phenotype, color: string) {
   );
 }
 
-function addFeelers(parent: RenderNode, p: Phenotype, color: string) {
-  // Small antennae/feelers to avoid "ball with nothing"
-  const len = clamp(p.limbLength * 0.45 + 0.9, 0.9, 2.6);
-  const thick = clamp(Math.max(0.08, p.limbThickness * 0.35), 0.08, 0.16);
+function addAntennae(parent: RenderNode, p: Phenotype, color: string) {
+  if (p.antennaeCount <= 0) return;
+  const len = clamp(p.limbLength * 0.45 + 0.8, 0.8, 2.4);
+  const thick = clamp(Math.max(0.08, p.limbThickness * 0.3), 0.08, 0.15);
+  const count = clampInt(p.antennaeCount, 1, 6);
 
-  for (let i = 0; i < 2; i += 1) {
-    const angle = -Math.PI / 4 + i * (Math.PI / 2);
-
-    // IMPORTANT: center offset so it starts at attachment point
+  for (let i = 0; i < count; i += 1) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    const angle = lerp(-Math.PI / 3, Math.PI / 3, t);
     parent.children.push(
       makeCapsuleLimb({
         x: parent.scale.x * 0.55,
-        y: (i === 0 ? 1 : -1) * parent.scale.y * 0.18,
+        y: lerp(-parent.scale.y * 0.2, parent.scale.y * 0.2, t),
         rot: angle,
         thickness: thick,
         length: len,
         color: darken(color, 12),
-        tag: `limb_feeler_${i}`,
+        tag: `limb_antenna_${i}`,
+        shape: "path",
+      }),
+    );
+  }
+}
+
+function addWhiskers(parent: RenderNode, p: Phenotype, color: string) {
+  if (p.whiskerCount <= 0) return;
+  const len = clamp(p.limbLength * 0.25 + 0.6, 0.6, 1.6);
+  const thick = clamp(Math.max(0.06, p.limbThickness * 0.2), 0.06, 0.12);
+  const count = clampInt(p.whiskerCount, 2, 8);
+
+  for (let i = 0; i < count; i += 1) {
+    const t = count === 1 ? 0.5 : i / (count - 1);
+    const angle = lerp(-Math.PI / 2, Math.PI / 2, t);
+    parent.children.push(
+      makeCapsuleLimb({
+        x: parent.scale.x * 0.45,
+        y: lerp(-parent.scale.y * 0.3, parent.scale.y * 0.3, t),
+        rot: angle,
+        thickness: thick,
+        length: len,
+        color: darken(color, 16),
+        tag: `limb_whisker_${i}`,
         shape: "path",
       }),
     );
@@ -518,78 +837,114 @@ function makeCapsuleLimb(args: {
     shape: args.shape,
     position: { x: args.x, y: args.y },
     rotation: args.rot,
-    // In OrganismSDF the capsule is centered on this node, aligned to its local +Y.
-    // We handle "start at joint" by positioning the node at -len/2 where appropriate.
+    // Capsule centered on node, aligned to local +Y
     scale: { x: args.thickness, y: args.length },
     color: args.color,
     opacity: 1.0,
     zIndex: 55,
     children: [],
-    // MUST include "limb" substring for OrganismSDF's limb animation logic
     animationTag: args.tag.includes("limb") ? args.tag : `limb_${args.tag}`,
   };
 }
 
 function addFaceCue(core: RenderNode, p: Phenotype, color: string) {
-  const ox = core.scale.x * 0.45;
-  const oy = core.scale.y * 0.16;
+  const isWalker = p.bodyPlan === "arthropod_walker" || (p.locomotion === "walk" && p.limbType === "leg");
+  const isSwimmer = p.locomotion === "swim";
+  const isFlyer = p.locomotion === "fly" || p.locomotion === "glide";
+  const anchor = isWalker ? findNodeByTag(core, "seg_head") ?? core : core;
 
-  const eyeA: RenderNode = {
-    id: uuidv4(),
-    type: "detail",
-    shape: "circle",
-    position: { x: ox, y: oy },
-    rotation: 0,
-    scale: { x: 0.10, y: 0.10 },
-    color: darken(color, 35),
-    opacity: 1.0,
-    zIndex: 120,
-    children: [],
-    animationTag: "eye_a",
-  };
+  const minimumEyes = isWalker || isSwimmer || isFlyer ? 2 : 0;
+  const eyeCount = Math.max(p.eyesCount, minimumEyes);
 
-  const eyeB: RenderNode = {
-    id: uuidv4(),
-    type: "detail",
-    shape: "circle",
-    position: { x: ox, y: -oy },
-    rotation: 0,
-    scale: { x: 0.10, y: 0.10 },
-    color: darken(color, 35),
-    opacity: 1.0,
-    zIndex: 120,
-    children: [],
-    animationTag: "eye_b",
-  };
+  const ox = anchor.scale.x * 0.55;
+  const baseY = anchor.scale.y * 0.18;
+  const spread = anchor.scale.y * 0.14;
 
-  core.children.push(eyeA, eyeB);
+  if (eyeCount > 0) {
+    const maxEyes = isWalker || isSwimmer || isFlyer ? 3 : 4;
+    const count = clampInt(eyeCount, 1, maxEyes);
+    const size = clamp(0.06 + p.eyesSize * 0.18, 0.06, 0.22);
 
-  if (p.locomotion !== "sessile") {
-    const mouth: RenderNode = {
+    const offsets = count === 1 ? [0] : count === 2 ? [-spread, spread] : [-spread, 0, spread];
+
+    offsets.forEach((offset, index) => {
+      anchor.children.push({
+        id: uuidv4(),
+        type: "sensor",
+        shape: "circle",
+        position: { x: ox, y: baseY + offset },
+        rotation: 0,
+        scale: { x: size, y: size },
+        color: darken(color, 35),
+        opacity: 1.0,
+        zIndex: 120,
+        children: [],
+        animationTag: `eye_${index}`,
+      });
+    });
+  }
+
+  if (p.mouthPresence > 0.2) {
+    anchor.children.push({
       id: uuidv4(),
-      type: "detail",
+      type: "sensor",
       shape: "oval",
       position: { x: ox * 1.05, y: 0 },
       rotation: 0,
-      scale: { x: 0.10, y: 0.07 },
+      scale: { x: 0.08 + p.mouthPresence * 0.08, y: 0.06 + p.mouthPresence * 0.06 },
       color: darken(color, 28),
       opacity: 1.0,
       zIndex: 119,
       children: [],
       animationTag: "mouth",
-    };
-    core.children.push(mouth);
+    });
   }
 }
 
 /* ------------------------------ Misc helpers ------------------------------ */
+
+function centerNodeTree(root: RenderNode) {
+  const bounds = getNodeBounds(root);
+  const centerX = (bounds.minX + bounds.maxX) * 0.5;
+  const centerY = (bounds.minY + bounds.maxY) * 0.5;
+  if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) return;
+  translateTree(root, -centerX, -centerY);
+}
+
+function getNodeBounds(root: RenderNode) {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  const visit = (node: RenderNode, px: number, py: number) => {
+    const x = px + node.position.x;
+    const y = py + node.position.y;
+    const radius = Math.max(node.scale.x, node.scale.y) * 0.5;
+    minX = Math.min(minX, x - radius);
+    maxX = Math.max(maxX, x + radius);
+    minY = Math.min(minY, y - radius);
+    maxY = Math.max(maxY, y + radius);
+    node.children.forEach((child) => visit(child, x, y));
+  };
+
+  visit(root, 0, 0);
+  if (!Number.isFinite(minX)) return { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+  return { minX, maxX, minY, maxY };
+}
+
+function translateTree(node: RenderNode, dx: number, dy: number) {
+  node.position.x += dx;
+  node.position.y += dy;
+  node.children.forEach((child) => translateTree(child, dx, dy));
+}
 
 function getLimbShape(type: LimbType): ShapeType {
   if (type === "fin") return "triangle";
   if (type === "wing") return "triangle";
   if (type === "tentacle") return "path";
   if (type === "cilia") return "path";
-  return "rect"; // leg
+  return "rect";
 }
 
 function getBaseColor(p: Phenotype): string {
@@ -604,9 +959,7 @@ function darken(hex: string, percent: number): string {
   if (!hex.startsWith("#")) return hex;
 
   const raw = hex.slice(1);
-  const expanded =
-    raw.length === 3 ? raw.split("").map((c) => `${c}${c}`).join("") : raw;
-
+  const expanded = raw.length === 3 ? raw.split("").map((c) => `${c}${c}`).join("") : raw;
   if (expanded.length !== 6) return hex;
 
   const num = parseInt(expanded, 16);

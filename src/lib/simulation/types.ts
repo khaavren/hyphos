@@ -45,6 +45,11 @@ export interface Environment {
   travelRate: number; // from phone movement
   proximityDensity: number; // nearby players
   volatility: number; // how much things change
+  biome: BiomeType;
+  biomePrev?: BiomeType;
+  biomeDrift?: number;
+  interactionRate?: number;
+  history?: EnvironmentHistory;
 }
 
 export type BodyPlan =
@@ -59,10 +64,22 @@ export type LimbType = 'fin' | 'leg' | 'wing' | 'tentacle' | 'cilia';
 
 export type SkinType = 'soft' | 'slimy' | 'scaly' | 'plated';
 
+export type EyePlacement = 'forward' | 'lateral' | 'stalk';
+
+export type EnvironmentHistory = {
+  biomeMix: Record<BiomeType, number>;
+  avgTemp: number;
+  avgVolatility: number;
+  travelIntensity: number;
+  interactionRate: number;
+};
+
 export interface Phenotype {
   // Classification
   bodyPlan: BodyPlan;
   skinType: SkinType;
+  biome?: BiomeType;
+  envHistory?: EnvironmentHistory;
 
   // Dimensions
   axialScale: [number, number, number]; // x, y, z
@@ -76,6 +93,13 @@ export interface Phenotype {
   limbType: LimbType;
   limbLength: number;
   limbThickness: number;
+  legPairs: number;
+  finPairs: number;
+  wingPairs: number;
+  wingArea: number;
+  tentaclePairs: number;
+  tailLength: number;
+  tailFinSize: number;
 
   // Surface
   patchCoverage: number; // moss/lichen/algae
@@ -84,6 +108,9 @@ export interface Phenotype {
   wetSheen: number;
   roughness: number;
   armorPlates: number;
+  furAmount: number;
+  slimeAmount: number;
+  camouflageAmount: number;
 
   // Animation / Vitality
   breathRate: number;
@@ -94,6 +121,49 @@ export interface Phenotype {
   // Extras
   ornamentation: number;
   broodPouches: number;
+  eyesCount: number;
+  eyesSize: number;
+  eyeCount: number;
+  eyeSize: number;
+  eyesPlacement: EyePlacement;
+  antennaeCount: number;
+  whiskerCount: number;
+  mouthPresence: number;
+  senseVision: number;
+  senseChemo: number;
+  senseMechano: number;
+  senseThermo: number;
+  senseElectro: number;
+  streamlining: number;
+  bodyAspectRatio: number;
 }
 
-export type BiomeType = "ocean" | "desert" | "forest" | "tundra" | "temperate";
+export type BiomeType =
+  | "tropical_rainforest"
+  | "tropical_seasonal_forest"
+  | "savanna"
+  | "desert_hot"
+  | "temperate_grassland"
+  | "temperate_deciduous_forest"
+  | "temperate_rainforest"
+  | "mediterranean_chaparral"
+  | "boreal_taiga"
+  | "tundra"
+  | "polar_ice"
+  | "mountain_alpine"
+  | "freshwater_river"
+  | "freshwater_lake_wetland"
+  | "marine_coastal_intertidal"
+  | "marine_coral_reef"
+  | "marine_open_ocean"
+  | "marine_deep_sea"
+  | "estuary_mangrove"
+  | "swamp_marsh"
+  | "cave_subterranean"
+  | "urban_anthropogenic"
+  // keep legacy:
+  | "ocean"
+  | "desert"
+  | "forest"
+  | "tundra_legacy"
+  | "temperate";

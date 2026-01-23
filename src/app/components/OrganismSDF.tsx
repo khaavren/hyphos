@@ -11,138 +11,54 @@ interface OrganismSDFProps {
   genome: Genome;
 }
 
-// Fixed size arrays for shader uniforms
-const MAX_BLOBS = 50;
-const MAX_CAPSULES = 50;
+/**
+ * FIX STRATEGY:
+ * - Do NOT "inject" matrices into meshes.
+ * - Render the RenderNode tree as real nested groups:
+ *     <group position/rotation/scale> ...children...
+ * - This makes limbs actually attach and stops the “tubes and blobs” look.
+ *
+ * SDF is kept as an optional toggle, but default OFF.
+ */
 
-type Mat2D = { a: number; b: number; c: number; d: number; tx: number; ty: number };
+// Fixed size arrays for shader uniforms (only used if SDF is enabled)
+const MAX_BLOBS = 80;
+const MAX_CAPSULES = 120;
 
-type CollectedNode = {
-  node: RenderNode;
-  worldMat: Mat2D;
-  worldPos: { x: number; y: number; z: number };
-  axisX: { x: number; y: number };
-  axisY: { x: number; y: number };
-  scaleX: number;
-  scaleY: number;
-  rotation: number;
-  zIndex: number;
-};
+const isBodyLike = (node: RenderNode) =>
+  node.type === "core" || node.type === "body_segment";
 
-type PrimitiveCounts = {
-  byType: Record<string, number>;
-  byShape: Record<string, number>;
-};
+const isLimbLike = (node: RenderNode) =>
+  node.type === "limb" ||
+  node.animationTag?.includes("limb") ||
+  node.animationTag?.includes("leg") ||
+  node.animationTag?.includes("tentacle");
 
-const Z_LAYER_SCALE = 0.002;
-const SENSOR_Z_BIAS = 0.04;
+const isSensorLike = (node: RenderNode) =>
+  node.type === "sensor" ||
+  node.animationTag?.includes("eye") ||
+  node.animationTag?.includes("mouth");
 
-const identityMat2D = (): Mat2D => ({ a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 });
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
 
-const composeMat2D = (parent: Mat2D, local: Mat2D): Mat2D => ({
-  a: parent.a * local.a + parent.c * local.b,
-  b: parent.b * local.a + parent.d * local.b,
-  c: parent.a * local.c + parent.c * local.d,
-  d: parent.b * local.c + parent.d * local.d,
-  tx: parent.a * local.tx + parent.c * local.ty + parent.tx,
-  ty: parent.b * local.tx + parent.d * local.ty + parent.ty,
-});
-
-const makeLocalMat2D = (node: RenderNode): Mat2D => {
-  const cos = Math.cos(node.rotation);
-  const sin = Math.sin(node.rotation);
-  return {
-    a: cos * node.scale.x,
-    b: sin * node.scale.x,
-    c: -sin * node.scale.y,
-    d: cos * node.scale.y,
-    tx: node.position.x,
-    ty: node.position.y,
-  };
-};
-
-const transformPoint = (mat: Mat2D, x: number, y: number) => ({
-  x: mat.a * x + mat.c * y + mat.tx,
-  y: mat.b * x + mat.d * y + mat.ty,
-});
-
-const normalize2 = (v: { x: number; y: number }) => {
-  const len = Math.hypot(v.x, v.y) || 1;
-  return { x: v.x / len, y: v.y / len };
-};
-
-const getTypePriority = (type: RenderNode["type"]) => {
-  switch (type) {
-    case "core":
-      return 0;
-    case "body_segment":
-      return 1;
-    case "limb":
-      return 2;
-    case "sensor":
-      return 3;
-    default:
-      return 0;
-  }
-};
-
-const flattenTree = (root: RenderNode): CollectedNode[] => {
-  const out: CollectedNode[] = [];
-  const visit = (node: RenderNode, parentMat: Mat2D) => {
-    const localMat = makeLocalMat2D(node);
-    const worldMat = composeMat2D(parentMat, localMat);
-    const axisX = { x: worldMat.a, y: worldMat.b };
-    const axisY = { x: worldMat.c, y: worldMat.d };
-    const scaleX = Math.hypot(axisX.x, axisX.y);
-    const scaleY = Math.hypot(axisY.x, axisY.y);
-    const rotation = Math.atan2(axisX.y, axisX.x);
-    const zIndex = node.zIndex ?? 0;
-    const z = zIndex * Z_LAYER_SCALE + (node.type === "sensor" ? SENSOR_Z_BIAS : 0);
-    out.push({
-      node,
-      worldMat,
-      worldPos: { x: worldMat.tx, y: worldMat.ty, z },
-      axisX,
-      axisY,
-      scaleX,
-      scaleY,
-      rotation,
-      zIndex,
-    });
-    node.children.forEach((child) => visit(child, worldMat));
-  };
-
-  visit(root, identityMat2D());
-  out.sort((a, b) => {
-    if (a.zIndex !== b.zIndex) return a.zIndex - b.zIndex;
-    return getTypePriority(a.node.type) - getTypePriority(b.node.type);
-  });
-  return out;
-};
-
-export default function OrganismSDF({ rootNode, phenotype, genome: _genome }: OrganismSDFProps) {
+export default function OrganismSDF({ rootNode, phenotype }: OrganismSDFProps) {
   const meshRef = useRef<THREE.Mesh>(null);
   const { camera } = useThree();
-  const debugPointsRef = useRef<THREE.Points>(null);
-  const debugLinesRef = useRef<THREE.LineSegments>(null);
-  const debugSDF = useMemo(() => {
-    if (typeof window === "undefined") return false;
-    return new URLSearchParams(window.location.search).get("debugSDF") === "1";
-  }, []);
-
-  void _genome;
 
   /**
-   * Renderer should follow phenotype (renderer input),
-   * not re-derive thresholds from genome.
+   * IMPORTANT DEFAULTS:
+   * If you want to see "creatures" (not blobs/tubes), keep SDF OFF.
    */
-  const segmentationEnabled = phenotype.segmentCount >= 2;
+  const USE_OVERLAY_TREE = true;
+  const USE_SDF_BODY = false; // ✅ default OFF
+
+  // Optional segmentation rings
+  const segmentationEnabled = false;
 
   const segmentCount = Math.max(1, phenotype.segmentCount);
-
-  // Tighter spacing reads more like segmentation than floating hoops.
   const segmentSpacing = phenotype.axialScale[0] * 1.25;
-
   const bodyRadius = Math.max(rootNode.scale.y, rootNode.scale.x * 0.35) * 0.5;
   const ringThickness = Math.max(0.12, bodyRadius * 0.12);
 
@@ -165,14 +81,14 @@ export default function OrganismSDF({ rootNode, phenotype, genome: _genome }: Or
       },
       u_capsuleCount: { value: 0 },
 
-      u_blendStrength: { value: 0.6 }, // gooey organic look
-      u_limbBlendStrength: { value: 0.15 }, // sharper limbs
-      u_noiseStrength: { value: 0.1 },
+      u_blendStrength: { value: 0.55 },
+      u_limbBlendStrength: { value: 0.12 },
+      u_noiseStrength: { value: 0.12 },
       u_breath: { value: 0.0 },
 
       u_skinScale: { value: 20.0 },
       u_skinRoughness: { value: 0.5 },
-      u_wetness: { value: 0.0 },
+      u_wetness: { value: 0.2 },
     }),
     [],
   );
@@ -189,208 +105,191 @@ export default function OrganismSDF({ rootNode, phenotype, genome: _genome }: Or
       roughness: 0.85,
       metalness: 0.05,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.65,
     });
   }, [rootNode.color]);
 
   useEffect(() => {
     return () => {
       ringGeometry?.dispose();
-    };
-  }, [ringGeometry]);
-
-  useEffect(() => {
-    return () => {
       ringMaterial.dispose();
     };
-  }, [ringMaterial]);
+  }, [ringGeometry, ringMaterial]);
 
   const ringPositions = useMemo(() => {
     if (!segmentationEnabled) return [];
     return Array.from({ length: segmentCount }, (_, index) => index * segmentSpacing);
   }, [segmentationEnabled, segmentCount, segmentSpacing]);
 
-  const flattenedNodes = useMemo(() => flattenTree(rootNode), [rootNode]);
+  /**
+   * Shared geometries for the overlay tree.
+   * These are unit shapes; we scale them per node via group scale.
+   */
+  const overlayGeoms = useMemo(() => {
+    const sphere = new THREE.SphereGeometry(0.5, 18, 14); // unit-ish
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    const cyl = new THREE.CylinderGeometry(0.5, 0.5, 1, 14, 1);
+    const triCone = new THREE.ConeGeometry(0.6, 1.2, 3, 1);
+    return { sphere, box, cyl, triCone };
+  }, []);
 
+  useEffect(() => {
+    return () => {
+      overlayGeoms.sphere.dispose();
+      overlayGeoms.box.dispose();
+      overlayGeoms.cyl.dispose();
+      overlayGeoms.triCone.dispose();
+    };
+  }, [overlayGeoms]);
+
+  /**
+   * Simple material helper.
+   */
+  const getMatProps = (node: RenderNode) => {
+    const kind: "body" | "limb" | "sensor" =
+      isSensorLike(node) ? "sensor" : isLimbLike(node) ? "limb" : "body";
+
+    const roughness = kind === "sensor" ? 0.25 : kind === "limb" ? 0.75 : 0.65;
+    const metalness = kind === "sensor" ? 0.08 : 0.02;
+
+    return { color: node.color, roughness, metalness };
+  };
+
+  /**
+   * BIG FIX: render node tree as actual nested transforms.
+   * This removes the “matrix injection” failure mode completely.
+   */
+  const RenderNodeTree = ({ node }: { node: RenderNode }) => {
+    // Depth: give everything a sane Z thickness so it never collapses into “lines”
+    const kind: "body" | "limb" | "sensor" =
+      isSensorLike(node) ? "sensor" : isLimbLike(node) ? "limb" : "body";
+
+    const sx = node.scale.x;
+    const sy = node.scale.y;
+
+    const sz =
+      kind === "body"
+        ? Math.max(0.35 * sy, 0.35) // body has real volume
+        : kind === "sensor"
+          ? Math.max(0.22 * sy, 0.18)
+          : Math.max(0.16 * sy, 0.14); // limbs thin but visible
+
+    // Pick a geometry that matches what assembler emits
+    let geom: THREE.BufferGeometry = overlayGeoms.sphere;
+
+    if (kind === "limb") {
+      if (node.shape === "triangle") geom = overlayGeoms.triCone; // wings/fins
+      else if (node.shape === "rect") geom = overlayGeoms.box; // legs
+      else if (node.shape === "path") geom = overlayGeoms.cyl; // tentacles/tails
+      else geom = overlayGeoms.sphere; // joints
+    } else {
+      // body + sensors are spheres/ovals in our simplified mesh set
+      geom = overlayGeoms.sphere;
+    }
+
+    // For triangle limbs: orient them so they read as a fin/wing (not edge-on)
+    const extraRotX =
+      kind === "limb" && node.shape === "triangle" ? Math.PI / 2 : 0;
+
+    // For cylinder limbs: cylinder is aligned to Y by default; our limbs are “length on Y” too => OK
+
+    const mat = getMatProps(node);
+
+    return (
+      <group
+        position={[node.position.x, node.position.y, 0]}
+        rotation={[extraRotX, 0, node.rotation]}
+        scale={[sx, sy, sz]}
+      >
+        <mesh geometry={geom} castShadow receiveShadow>
+          <meshStandardMaterial
+            color={mat.color}
+            roughness={mat.roughness}
+            metalness={mat.metalness}
+          />
+        </mesh>
+
+        {node.children?.map((child) => (
+          <RenderNodeTree key={child.id} node={child} />
+        ))}
+      </group>
+    );
+  };
+
+  /**
+   * OPTIONAL: SDF uniforms update (only if enabled)
+   */
   useFrame((state) => {
-    if (!meshRef.current) return;
-
     const t = state.clock.elapsedTime;
     uniforms.u_time.value = t;
     uniforms.u_cameraPos.value.copy(camera.position);
 
+    if (!USE_SDF_BODY || !meshRef.current) {
+      uniforms.u_blobCount.value = 0;
+      uniforms.u_capsuleCount.value = 0;
+      return;
+    }
+
     let blobCount = 0;
     let capsuleCount = 0;
 
-    const counts: PrimitiveCounts = {
-      byType: { core: 0, body_segment: 0, limb: 0, sensor: 0 },
-      byShape: { circle: 0, oval: 0, rect: 0, triangle: 0, path: 0 },
-    };
+    const traverse = (node: RenderNode, parentMatrix: THREE.Matrix4) => {
+      if (blobCount >= MAX_BLOBS || capsuleCount >= MAX_CAPSULES) return;
 
-    const addBlob = (x: number, y: number, z: number, r: number) => {
-      if (blobCount >= MAX_BLOBS) return;
-      uniforms.u_blobs.value[blobCount].set(x, y, z, r);
-      blobCount += 1;
-    };
+      const localMatrix = new THREE.Matrix4();
+      localMatrix.compose(
+        new THREE.Vector3(node.position.x, node.position.y, 0),
+        new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), node.rotation),
+        new THREE.Vector3(node.scale.x, node.scale.y, node.scale.x),
+      );
 
-    const addCapsule = (
-      ax: number,
-      ay: number,
-      az: number,
-      bx: number,
-      by: number,
-      bz: number,
-      r: number,
-    ) => {
-      if (capsuleCount >= MAX_CAPSULES) return;
-      uniforms.u_capsulesA.value[capsuleCount].set(ax, ay, az);
-      uniforms.u_capsulesB.value[capsuleCount].set(bx, by, bz, r);
-      capsuleCount += 1;
-    };
+      const worldMatrix = parentMatrix.clone().multiply(localMatrix);
 
-    const animatePosition = (pos: { x: number; y: number; z: number }, tag?: string) => {
-      const next = { ...pos };
-      if (tag?.includes("limb") || tag?.includes("leg") || tag?.includes("feeler")) {
-        const speed = phenotype.gaitRate * 5.0;
-        const offset = pos.x * 0.5;
-        next.z += Math.sin(t * speed + offset) * 0.5;
-        next.y += Math.cos(t * speed + offset) * 0.3;
-      } else if (tag?.includes("seg")) {
-        next.y += Math.sin(t * phenotype.gaitRate * 3.0 + pos.x) * 0.2;
-      } else if (tag?.includes("tentacle")) {
-        const speed = phenotype.gaitRate * 3.0;
-        next.x += Math.sin(t * speed + pos.y) * 0.3;
-        next.z += Math.cos(t * speed + pos.y) * 0.3;
+      const worldPos = new THREE.Vector3();
+      const worldScale = new THREE.Vector3();
+      const worldQuat = new THREE.Quaternion();
+      worldMatrix.decompose(worldPos, worldQuat, worldScale);
+
+      if (isBodyLike(node)) {
+        const r = Math.max(worldScale.x, worldScale.y) * 0.65 + 0.15;
+        uniforms.u_blobs.value[blobCount].set(worldPos.x, worldPos.y, worldPos.z, r);
+        blobCount += 1;
+      } else if (isLimbLike(node)) {
+        const radius = Math.max(0.08, worldScale.x * 0.35);
+        const len = Math.max(0.25, worldScale.y);
+
+        const up = new THREE.Vector3(0, 1, 0).applyQuaternion(worldQuat);
+        const halfLen = len * 0.5;
+
+        const posA = worldPos.clone().addScaledVector(up, -halfLen);
+        const posB = worldPos.clone().addScaledVector(up, halfLen);
+
+        if (capsuleCount < MAX_CAPSULES) {
+          uniforms.u_capsulesA.value[capsuleCount].set(posA.x, posA.y, posA.z);
+          uniforms.u_capsulesB.value[capsuleCount].set(posB.x, posB.y, posB.z, radius);
+          capsuleCount += 1;
+        }
       }
-      return next;
+
+      node.children?.forEach((child) => traverse(child, worldMatrix));
     };
 
-    const addEllipticalBlobChain = (
-      pos: { x: number; y: number; z: number },
-      axis: { x: number; y: number },
-      major: number,
-      minor: number,
-    ) => {
-      const radius = minor * 0.5;
-      const halfLen = Math.max(0, major * 0.5 - radius);
-      if (halfLen <= 0.001) {
-        addBlob(pos.x, pos.y, pos.z, major * 0.5);
-        return;
-      }
-      const dir = normalize2(axis);
-      const dx = dir.x * halfLen;
-      const dy = dir.y * halfLen;
-      addBlob(pos.x, pos.y, pos.z, radius);
-      addBlob(pos.x + dx, pos.y + dy, pos.z, radius);
-      addBlob(pos.x - dx, pos.y - dy, pos.z, radius);
-    };
-
-    flattenedNodes.forEach((entry) => {
-      const { node, worldMat, worldPos, axisX, axisY, scaleX, scaleY } = entry;
-      counts.byType[node.type] = (counts.byType[node.type] ?? 0) + 1;
-      counts.byShape[node.shape] = (counts.byShape[node.shape] ?? 0) + 1;
-
-      const pos = animatePosition(worldPos, node.animationTag);
-      const animDx = pos.x - worldPos.x;
-      const animDy = pos.y - worldPos.y;
-      const major = Math.max(scaleX, scaleY);
-      const minor = Math.min(scaleX, scaleY);
-
-      switch (node.shape) {
-        case "circle": {
-          const radius = Math.max(scaleX, scaleY) * 0.5;
-          addBlob(pos.x, pos.y, pos.z, radius);
-          break;
-        }
-        case "oval": {
-          const axis = scaleX >= scaleY ? axisX : axisY;
-          addEllipticalBlobChain(pos, axis, major, minor);
-          break;
-        }
-        case "rect": {
-          const axis = scaleX >= scaleY ? axisX : axisY;
-          addEllipticalBlobChain(pos, axis, major, minor);
-          break;
-        }
-        case "path": {
-          const axis = normalize2(axisY);
-          const halfLen = Math.max(0.001, scaleY * 0.5);
-          const radius = Math.max(0.06, scaleX * 0.5);
-          const ax = pos.x - axis.x * halfLen;
-          const ay = pos.y - axis.y * halfLen;
-          const bx = pos.x + axis.x * halfLen;
-          const by = pos.y + axis.y * halfLen;
-          addCapsule(ax, ay, pos.z, bx, by, pos.z, radius);
-          break;
-        }
-        case "triangle": {
-          const v0 = transformPoint(worldMat, 0, scaleY * 0.5);
-          const v1 = transformPoint(worldMat, -scaleX * 0.5, -scaleY * 0.5);
-          const v2 = transformPoint(worldMat, scaleX * 0.5, -scaleY * 0.5);
-          v0.x += animDx;
-          v0.y += animDy;
-          v1.x += animDx;
-          v1.y += animDy;
-          v2.x += animDx;
-          v2.y += animDy;
-          const radius = Math.max(0.04, Math.min(scaleX, scaleY) * 0.08);
-          addCapsule(v0.x, v0.y, pos.z, v1.x, v1.y, pos.z, radius);
-          addCapsule(v1.x, v1.y, pos.z, v2.x, v2.y, pos.z, radius);
-          addCapsule(v2.x, v2.y, pos.z, v0.x, v0.y, pos.z, radius);
-          break;
-        }
-        default:
-          break;
-      }
-    });
+    traverse(rootNode, new THREE.Matrix4());
 
     uniforms.u_blobCount.value = blobCount;
     uniforms.u_capsuleCount.value = capsuleCount;
 
-    if (debugSDF) {
-      // eslint-disable-next-line no-console
-      console.log("[SDF] primitives", counts.byType, counts.byShape);
-    }
-
-    if (debugSDF && debugPointsRef.current && debugLinesRef.current) {
-      const pointPositions = new Float32Array(flattenedNodes.length * 3);
-      const linePositions = new Float32Array(flattenedNodes.length * 6);
-      flattenedNodes.forEach((entry, index) => {
-        const pos = animatePosition(entry.worldPos, entry.node.animationTag);
-        const axis = normalize2(entry.axisX);
-        const length = Math.max(entry.scaleX, entry.scaleY) * 0.5;
-        pointPositions[index * 3] = pos.x;
-        pointPositions[index * 3 + 1] = pos.y;
-        pointPositions[index * 3 + 2] = pos.z;
-        linePositions[index * 6] = pos.x;
-        linePositions[index * 6 + 1] = pos.y;
-        linePositions[index * 6 + 2] = pos.z;
-        linePositions[index * 6 + 3] = pos.x + axis.x * length;
-        linePositions[index * 6 + 4] = pos.y + axis.y * length;
-        linePositions[index * 6 + 5] = pos.z;
-      });
-
-      const pointsGeom = debugPointsRef.current.geometry as THREE.BufferGeometry;
-      const linesGeom = debugLinesRef.current.geometry as THREE.BufferGeometry;
-      pointsGeom.setAttribute("position", new THREE.BufferAttribute(pointPositions, 3));
-      linesGeom.setAttribute("position", new THREE.BufferAttribute(linePositions, 3));
-    }
-
-    // Material controls
     uniforms.u_color.value.set(rootNode.color);
-    uniforms.u_blendStrength.value = 0.3 + (1.0 - phenotype.rigidity) * 0.3;
-    uniforms.u_limbBlendStrength.value = 0.1 + phenotype.rigidity * 0.1;
-    uniforms.u_noiseStrength.value = phenotype.roughness * 0.2;
+    uniforms.u_blendStrength.value = 0.25 + (1.0 - phenotype.rigidity) * 0.35;
+    uniforms.u_limbBlendStrength.value = 0.08 + phenotype.rigidity * 0.1;
+    uniforms.u_noiseStrength.value = clamp(phenotype.roughness * 0.22, 0.0, 0.35);
 
-    // Breathing
     const breathCycle = Math.sin(t * (phenotype.breathRate * 5.0));
     uniforms.u_breath.value = breathCycle * phenotype.breathAmplitude;
 
-    // Skin fidelity
     uniforms.u_skinScale.value = 15.0 + (1.0 - phenotype.roughness) * 20.0;
-    uniforms.u_skinRoughness.value = phenotype.roughness;
+    uniforms.u_skinRoughness.value = clamp(phenotype.roughness, 0.1, 1.0);
 
-    // Wetness
     let wetness = 0.2;
     if (phenotype.skinType === "slimy" || phenotype.skinType === "soft") wetness = 0.8;
     if (phenotype.skinType === "plated") wetness = 0.1;
@@ -401,18 +300,22 @@ export default function OrganismSDF({ rootNode, phenotype, genome: _genome }: Or
 
   return (
     <group>
-      <mesh ref={meshRef} position={[0, 0, 0]}>
-        <boxGeometry args={[40, 40, 40]} />
-        <shaderMaterial
-          vertexShader={sdfVertexShader}
-          fragmentShader={sdfFragmentShader}
-          uniforms={uniforms}
-          transparent={true}
-          depthWrite={false}
-          side={THREE.BackSide}
-        />
-      </mesh>
+      {/* Optional SDF body */}
+      {USE_SDF_BODY ? (
+        <mesh ref={meshRef} position={[0, 0, 0]}>
+          <boxGeometry args={[40, 40, 40]} />
+          <shaderMaterial
+            vertexShader={sdfVertexShader}
+            fragmentShader={sdfFragmentShader}
+            uniforms={uniforms}
+            transparent
+            depthWrite={false}
+            side={THREE.BackSide}
+          />
+        </mesh>
+      ) : null}
 
+      {/* Optional segmentation rings */}
       {segmentationEnabled && ringGeometry ? (
         <group>
           {ringPositions.map((x, index) => (
@@ -427,18 +330,8 @@ export default function OrganismSDF({ rootNode, phenotype, genome: _genome }: Or
         </group>
       ) : null}
 
-      {debugSDF ? (
-        <group>
-          <points ref={debugPointsRef}>
-            <bufferGeometry />
-            <pointsMaterial size={0.12} color="#ff4fd8" depthTest={false} depthWrite={false} />
-          </points>
-          <lineSegments ref={debugLinesRef}>
-            <bufferGeometry />
-            <lineBasicMaterial color="#34d8ff" depthTest={false} depthWrite={false} />
-          </lineSegments>
-        </group>
-      ) : null}
+      {/* ✅ Real creature silhouette: render the RenderNode tree */}
+      {USE_OVERLAY_TREE ? <RenderNodeTree node={rootNode} /> : null}
     </group>
   );
 }
